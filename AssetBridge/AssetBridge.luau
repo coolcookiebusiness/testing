@@ -4,9 +4,6 @@ local AssetBridge = {
     Config = {
         Cache = true,
         MaxBytes = 52428800,
-        GIFMaxFrames = 120,
-        GIFMaxPixels = 1048576,
-        GIFMaxOutputBytes = 40000000,
         GIFMinFrameDelay = 0.02
     },
     Image = {},
@@ -880,14 +877,7 @@ local function assetBridgeGifDecode(gifBytes, gifOptions)
         return nil, "GIF dimensions must be greater than zero."
     end
 
-    local maximumGifPixels = tonumber(gifOptions.MaxPixels) or tonumber(AssetBridge.Config.GIFMaxPixels) or 1048576
-    local maximumGifFrames = tonumber(gifOptions.MaxFrames) or tonumber(AssetBridge.Config.GIFMaxFrames) or 120
-    local maximumGifOutputBytes = tonumber(gifOptions.MaxOutputBytes) or tonumber(AssetBridge.Config.GIFMaxOutputBytes) or 40000000
-
     local logicalScreenPixels = gifCanvasWidth * gifCanvasHeight
-    if logicalScreenPixels > maximumGifPixels then
-        return nil, "GIF dimensions exceed the configured GIFMaxPixels limit."
-    end
 
     local globalColorTable = nil
     if bit32.band(gifScreenPacked, 128) ~= 0 then
@@ -1014,10 +1004,6 @@ local function assetBridgeGifDecode(gifBytes, gifOptions)
                 previousGraphicFrame = nil
             end
 
-            if #gifFrames >= maximumGifFrames then
-                return nil, "GIF exceeds the configured GIFMaxFrames limit."
-            end
-
             local frameX = assetBridgeGifReadUInt16(gifBytes, gifPosition)
             local frameY = assetBridgeGifReadUInt16(gifBytes, gifPosition + 2)
             local frameWidth = assetBridgeGifReadUInt16(gifBytes, gifPosition + 4)
@@ -1038,10 +1024,6 @@ local function assetBridgeGifDecode(gifBytes, gifOptions)
             end
 
             local framePixelCount = frameWidth * frameHeight
-            if framePixelCount > maximumGifPixels then
-                return nil, "GIF frame dimensions exceed the configured GIFMaxPixels limit."
-            end
-
             gifTotalPixels = gifTotalPixels + logicalScreenPixels
 
 
@@ -1150,9 +1132,6 @@ local function assetBridgeGifDecode(gifBytes, gifOptions)
             end
 
             gifTotalOutputBytes = gifTotalOutputBytes + #pngFrameBytes
-            if gifTotalOutputBytes > maximumGifOutputBytes then
-                return nil, "Decoded GIF frames exceed the configured GIFMaxOutputBytes limit."
-            end
 
             local frameDelaySeconds = gifGraphicControl.Delay / 100
             if frameDelaySeconds <= 0 then
@@ -1242,12 +1221,6 @@ local function assetBridgeGifScanFrames(gifBytes, gifOptions)
     end
 
     local logicalScreenPixels = gifCanvasWidth * gifCanvasHeight
-    local maximumGifPixels = tonumber(gifOptions.MaxPixels) or tonumber(AssetBridge.Config.GIFMaxPixels) or 1048576
-    local maximumGifFrames = tonumber(gifOptions.MaxFrames) or tonumber(AssetBridge.Config.GIFMaxFrames) or 120
-
-    if logicalScreenPixels > maximumGifPixels then
-        return nil, "GIF dimensions exceed the configured GIFMaxPixels limit."
-    end
 
     local globalColorTable = nil
     if bit32.band(gifScreenPacked, 128) ~= 0 then
@@ -1338,10 +1311,6 @@ local function assetBridgeGifScanFrames(gifBytes, gifOptions)
                 gifPosition = nextPosition
             end
         elseif blockIntroducer == 44 then
-            if #gifFrames >= maximumGifFrames then
-                return nil, "GIF exceeds the configured GIFMaxFrames limit."
-            end
-
             local frameX = assetBridgeGifReadUInt16(gifBytes, gifPosition)
             local frameY = assetBridgeGifReadUInt16(gifBytes, gifPosition + 2)
             local frameWidth = assetBridgeGifReadUInt16(gifBytes, gifPosition + 4)
@@ -1362,10 +1331,6 @@ local function assetBridgeGifScanFrames(gifBytes, gifOptions)
             end
 
             local framePixelCount = frameWidth * frameHeight
-            if framePixelCount > maximumGifPixels then
-                return nil, "GIF frame dimensions exceed the configured GIFMaxPixels limit."
-            end
-
             gifTotalPixels = gifTotalPixels + logicalScreenPixels
 
             local localColorTable = nil
@@ -1579,10 +1544,6 @@ local function assetBridgeGifIncrementalDecodeFrame(gifDecoder, preparedFramePix
     end
 
     gifDecoder.TotalOutputBytes = gifDecoder.TotalOutputBytes + #pngFrameBytes
-    if gifDecoder.TotalOutputBytes > gifDecoder._maximumOutputBytes then
-        return nil, "Decoded GIF frames exceed the configured GIFMaxOutputBytes limit."
-    end
-
     local animationHash = assetBridgeHashString(gifDecoder.Url)
     local frameFilePath = "AssetBridge_GIF_" .. animationHash .. "_Frame_" .. string.format("%04d", nextFrameIndex) .. ".png"
     local useExistingFile = not gifDecoder._refresh and assetBridgeFileExists(frameFilePath)
@@ -1802,7 +1763,6 @@ local function assetBridgeCreateIncrementalGifDecoder(gifDownload, gifScanned, g
         _transparentPixel = transparentPixel,
         _initialTransparent = gifScanned.InitialTransparent,
         _previousGraphicFrame = nil,
-        _maximumOutputBytes = tonumber(gifOptions.MaxOutputBytes) or tonumber(AssetBridge.Config.GIFMaxOutputBytes) or 40000000,
         _yieldEveryRows = math.max(0, math.floor(tonumber(gifOptions.YieldEveryRows) or 24)),
         _yieldEveryCodes = math.max(0, math.floor(tonumber(gifOptions.YieldEveryCodes) or 8192)),
         _refresh = gifOptions.Refresh == true,
@@ -2180,7 +2140,13 @@ end
 function AssetBridge.GIF.Open(gifUrl, gifOptions)
     gifOptions = gifOptions or {}
 
-    local downloadedGif, gifDownloadError = assetBridgeDownload(gifUrl, "Image", gifOptions)
+    local gifDownloadOptions = {}
+    for optionName, optionValue in pairs(gifOptions) do
+        gifDownloadOptions[optionName] = optionValue
+    end
+    gifDownloadOptions.MaxBytes = math.huge
+
+    local downloadedGif, gifDownloadError = assetBridgeDownload(gifUrl, "Image", gifDownloadOptions)
     if not downloadedGif then
         return nil, gifDownloadError
     end
@@ -2199,7 +2165,7 @@ function AssetBridge.GIF.Open(gifUrl, gifOptions)
 
     if type(gifBytes) ~= "string" then
         local forcedOptions = {}
-        for optionName, optionValue in pairs(gifOptions) do
+        for optionName, optionValue in pairs(gifDownloadOptions) do
             forcedOptions[optionName] = optionValue
         end
         forcedOptions.Refresh = true
@@ -2234,7 +2200,11 @@ function AssetBridge.GIF.Fetch(gifUrl, gifOptions)
         return nil, gifOpenError
     end
 
-    local decodedFrames, parallelDecodeError = gifDecoder:DecodeNextFramesParallel(gifDecoder.FrameCount)
+    local decodedFrames, parallelDecodeError = gifDecoder:DecodeNextFramesParallel(
+        gifDecoder.FrameCount,
+        gifOptions.OnFrameDecoded,
+        gifOptions.OnDecodeProgress
+    )
     if not decodedFrames then
         gifDecoder:Destroy()
         return nil, parallelDecodeError
