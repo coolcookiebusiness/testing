@@ -1,9 +1,12 @@
 local AssetBridge = {
     Name = "AssetBridge",
-    Version = "0.3.0",
+    Version = "0.2.3",
     Config = {
         Cache = true,
         MaxBytes = 52428800,
+        GIFMaxFrames = 120,
+        GIFMaxPixels = 1048576,
+        GIFMaxOutputBytes = 40000000,
         GIFMinFrameDelay = 0.02
     },
     Image = {},
@@ -16,18 +19,12 @@ local AssetBridge = {
 AssetBridge.Gif = AssetBridge.GIF
 
 local assetBridgeMemoryCache = {}
-local assetBridgeActiveResources = setmetatable({}, {__mode = "k"})
-local assetBridgeSessionGeneration = 0
-local assetBridgeCloseInProgress = false
 local assetBridgeRequestFunction = request or http_request
 local assetBridgeWriteFileFunction = writefile
 local assetBridgeReadFileFunction = readfile
 local assetBridgeIsFileFunction = isfile
 local assetBridgeDeleteFileFunction = delfile
-local assetBridgeMakeFolderFunction = makefolder
-local assetBridgeIsFolderFunction = isfolder
 local assetBridgeGetCustomAssetFunction = getcustomasset or getsynasset
-local assetBridgeBufferLibrary = buffer
 local assetBridgeSoundService = game:GetService("SoundService")
 local assetBridgeInstanceNew = Instance.new
 
@@ -104,8 +101,6 @@ local function assetBridgeRefreshCapabilities()
     assetBridgeReadFileFunction = assetBridgeSafeGetGlobal("readfile") or assetBridgeReadFileFunction
     assetBridgeIsFileFunction = assetBridgeSafeGetGlobal("isfile") or assetBridgeIsFileFunction
     assetBridgeDeleteFileFunction = assetBridgeSafeGetGlobal("delfile") or assetBridgeDeleteFileFunction
-    assetBridgeMakeFolderFunction = assetBridgeSafeGetGlobal("makefolder") or assetBridgeMakeFolderFunction
-    assetBridgeIsFolderFunction = assetBridgeSafeGetGlobal("isfolder") or assetBridgeIsFolderFunction
     assetBridgeGetCustomAssetFunction = assetBridgeSafeGetGlobal("getcustomasset") or assetBridgeSafeGetGlobal("getsynasset") or assetBridgeGetCustomAssetFunction
 
     AssetBridge.Capabilities = {
@@ -293,69 +288,8 @@ local function assetBridgePerformHttpRequest(assetBridgeUrl, assetBridgeOptions)
     return nil, "No compatible HTTP request function succeeded."
 end
 
-local assetBridgeCacheRoot = "abysall/AssetBridge"
-local assetBridgeTrackedFiles = {}
-local assetBridgeCacheDirectories = {
-    GIF = assetBridgeCacheRoot .. "/gif",
-    Audio = assetBridgeCacheRoot .. "/audio",
-    Image = assetBridgeCacheRoot .. "/png",
-    YouTube = assetBridgeCacheRoot .. "/youtube"
-}
-
-AssetBridge.Cache.Directories = {
-    Root = assetBridgeCacheRoot,
-    GIF = assetBridgeCacheDirectories.GIF,
-    Audio = assetBridgeCacheDirectories.Audio,
-    PNG = assetBridgeCacheDirectories.Image,
-    YouTube = assetBridgeCacheDirectories.YouTube
-}
-
-local function assetBridgeEnsureFolder(assetBridgeFolderPath)
-    if type(assetBridgeMakeFolderFunction) ~= "function" then
-        return false, "This executor does not expose makefolder()."
-    end
-
-    local currentFolderPath = ""
-    for folderSegment in string.gmatch(assetBridgeFolderPath, "[^/]+") do
-        currentFolderPath = currentFolderPath == "" and folderSegment or (currentFolderPath .. "/" .. folderSegment)
-
-        local folderExists = false
-        if type(assetBridgeIsFolderFunction) == "function" then
-            local folderCheckSuccess, folderCheckResult = pcall(assetBridgeIsFolderFunction, currentFolderPath)
-            folderExists = folderCheckSuccess and folderCheckResult == true
-        end
-
-        if not folderExists then
-            local folderCreateSuccess, folderCreateError = pcall(assetBridgeMakeFolderFunction, currentFolderPath)
-            if not folderCreateSuccess and type(assetBridgeIsFolderFunction) == "function" then
-                local recheckSuccess, recheckExists = pcall(assetBridgeIsFolderFunction, currentFolderPath)
-                if not (recheckSuccess and recheckExists == true) then
-                    return false, "Could not create cache folder '" .. currentFolderPath .. "': " .. tostring(folderCreateError)
-                end
-            end
-        end
-    end
-
-    return true
-end
-
-local function assetBridgeGetCacheDirectory(assetBridgeExpectedType, assetBridgeExtension)
-    if assetBridgeExpectedType == "Audio" then
-        return assetBridgeCacheDirectories.Audio
-    end
-    if assetBridgeExpectedType == "GIF" or assetBridgeExtension == "gif" then
-        return assetBridgeCacheDirectories.GIF
-    end
-    return assetBridgeCacheDirectories.Image
-end
-
-local function assetBridgeBuildCachePath(assetBridgeUrl, assetBridgeExtension, assetBridgeExpectedType)
-    local cacheDirectory = assetBridgeGetCacheDirectory(assetBridgeExpectedType, assetBridgeExtension)
-    return cacheDirectory .. "/" .. assetBridgeHashString(assetBridgeUrl) .. "." .. assetBridgeExtension
-end
-
-for _, assetBridgeDirectoryPath in pairs(assetBridgeCacheDirectories) do
-    assetBridgeEnsureFolder(assetBridgeDirectoryPath)
+local function assetBridgeBuildCachePath(assetBridgeUrl, assetBridgeExtension)
+    return "AssetBridge_" .. assetBridgeHashString(assetBridgeUrl) .. "." .. assetBridgeExtension
 end
 
 local function assetBridgeFileExists(assetBridgePath)
@@ -381,7 +315,7 @@ local function assetBridgeGetCachedFile(assetBridgeUrl, assetBridgeExpectedType,
         return nil
     end
 
-    local assetBridgeCachePath = assetBridgeBuildCachePath(assetBridgeUrl, assetBridgeKnownExtension, assetBridgeExpectedType)
+    local assetBridgeCachePath = assetBridgeBuildCachePath(assetBridgeUrl, assetBridgeKnownExtension)
 
     if not assetBridgeFileExists(assetBridgeCachePath) then
         return nil
@@ -408,10 +342,6 @@ end
 
 local function assetBridgeDownload(assetBridgeUrl, assetBridgeExpectedType, assetBridgeOptions)
     assetBridgeOptions = assetBridgeOptions or {}
-    if assetBridgeCloseInProgress then
-        return nil, "AssetBridge is closing."
-    end
-    local requestSessionGeneration = assetBridgeSessionGeneration
 
     local assetBridgeNormalizedUrl, assetBridgeNormalizeError = assetBridgeNormalizeUrl(assetBridgeUrl)
     if not assetBridgeNormalizedUrl then
@@ -445,9 +375,6 @@ local function assetBridgeDownload(assetBridgeUrl, assetBridgeExpectedType, asse
     if type(assetBridgeDownloadedBytes) ~= "string" then
         return nil, assetBridgeResponseHeaders or "Download failed."
     end
-    if requestSessionGeneration ~= assetBridgeSessionGeneration or assetBridgeCloseInProgress then
-        return nil, "AssetBridge was closed during the download."
-    end
 
     local assetBridgeMaximumBytes = tonumber(assetBridgeOptions.MaxBytes) or tonumber(AssetBridge.Config.MaxBytes) or 52428800
     if #assetBridgeDownloadedBytes > assetBridgeMaximumBytes then
@@ -468,18 +395,12 @@ local function assetBridgeDownload(assetBridgeUrl, assetBridgeExpectedType, asse
         return nil, "The URL did not return a supported " .. string.lower(assetBridgeExpectedType) .. " format. Detected: " .. assetBridgeDetectedExtension
     end
 
-    local assetBridgeCachePath = assetBridgeBuildCachePath(assetBridgeNormalizedUrl, assetBridgeDetectedExtension, assetBridgeExpectedType)
-    local cacheFolderSuccess, cacheFolderError = assetBridgeEnsureFolder(assetBridgeGetCacheDirectory(assetBridgeExpectedType, assetBridgeDetectedExtension))
-    if not cacheFolderSuccess then
-        return nil, cacheFolderError
-    end
-
+    local assetBridgeCachePath = assetBridgeBuildCachePath(assetBridgeNormalizedUrl, assetBridgeDetectedExtension)
     local assetBridgeWriteSuccess, assetBridgeWriteError = pcall(assetBridgeWriteFileFunction, assetBridgeCachePath, assetBridgeDownloadedBytes)
 
     if not assetBridgeWriteSuccess then
         return nil, "Could not write the downloaded file: " .. tostring(assetBridgeWriteError)
     end
-    assetBridgeTrackedFiles[assetBridgeCachePath] = true
 
     local assetBridgeAssetData = {
         Url = assetBridgeNormalizedUrl,
@@ -657,36 +578,14 @@ local function assetBridgeGifDecodeLZW(gifCompressedBytes, gifMinimumCodeSize, g
     local gifEndCode = gifClearCode + 1
     local gifCodeSize = gifMinimumCodeSize + 1
     local gifNextCode = gifEndCode + 1
-    local gifPrefix = {}
-    local gifSuffix = {}
-    local gifExpansionStack = {}
+    local gifDictionary = {}
     local gifBitPosition = 0
     local gifBytePosition = 1
     local gifBitBuffer = 0
     local gifBitCount = 0
-    local gifOutputParts = nil
-    local gifOutputChunk = nil
-    local gifOutputChunkCount = 0
+    local gifOutputParts = {}
     local gifOutputLength = 0
-    local gifOutputBuffer = nil
-
-    if assetBridgeBufferLibrary
-        and type(assetBridgeBufferLibrary.create) == "function"
-        and type(assetBridgeBufferLibrary.writeu8) == "function"
-        and type(assetBridgeBufferLibrary.tostring) == "function" then
-        local outputBufferSuccess, outputBuffer = pcall(assetBridgeBufferLibrary.create, gifExpectedPixelCount)
-        if outputBufferSuccess and outputBuffer then
-            gifOutputBuffer = outputBuffer
-        end
-    end
-
-    if not gifOutputBuffer then
-        gifOutputParts = {}
-        gifOutputChunk = table.create and table.create(1024) or {}
-    end
-    local gifPreviousCode = nil
-    local gifProcessedCodeCount = 0
-    local gifUnpack = table.unpack or unpack
+    local gifPreviousEntry = nil
 
     local function assetBridgeGifReadCode(codeWidth)
         while gifBitCount < codeWidth do
@@ -694,96 +593,35 @@ local function assetBridgeGifDecodeLZW(gifCompressedBytes, gifMinimumCodeSize, g
             if not nextByte then
                 return nil
             end
-            if bit32 then
-                gifBitBuffer = bit32.bor(gifBitBuffer, bit32.lshift(nextByte, gifBitCount))
-            else
-                gifBitBuffer = gifBitBuffer + nextByte * (2 ^ gifBitCount)
-            end
+            gifBitBuffer = gifBitBuffer + nextByte * (2 ^ gifBitCount)
             gifBitCount = gifBitCount + 8
             gifBytePosition = gifBytePosition + 1
         end
 
         local codeModulus = 2 ^ codeWidth
-        local decodedCode
-        if bit32 then
-            decodedCode = bit32.band(gifBitBuffer, codeModulus - 1)
-            gifBitBuffer = bit32.rshift(gifBitBuffer, codeWidth)
-        else
-            decodedCode = gifBitBuffer % codeModulus
-            gifBitBuffer = math.floor(gifBitBuffer / codeModulus)
-        end
+        local decodedCode = gifBitBuffer % codeModulus
+        gifBitBuffer = math.floor(gifBitBuffer / codeModulus)
         gifBitCount = gifBitCount - codeWidth
         return decodedCode
     end
 
-    local function assetBridgeGifFlushOutputChunk()
-        if gifOutputChunkCount > 0 then
-            gifOutputParts[#gifOutputParts + 1] = string.char(gifUnpack(gifOutputChunk, 1, gifOutputChunkCount))
-            if table.clear then
-                table.clear(gifOutputChunk)
-            else
-                gifOutputChunk = {}
-            end
-            gifOutputChunkCount = 0
-        end
-    end
-
-    local function assetBridgeGifAppendOutputByte(outputByte)
-        gifOutputLength = gifOutputLength + 1
-        if gifOutputLength > gifExpectedPixelCount then
-            return false, "GIF frame decoded to more pixels than its dimensions allow."
-        end
-
-        if gifOutputBuffer then
-            assetBridgeBufferLibrary.writeu8(gifOutputBuffer, gifOutputLength - 1, outputByte)
-        else
-            gifOutputChunkCount = gifOutputChunkCount + 1
-            gifOutputChunk[gifOutputChunkCount] = outputByte
-            if gifOutputChunkCount >= 1024 then
-                assetBridgeGifFlushOutputChunk()
-            end
-        end
-        return true
-    end
-
     local function assetBridgeGifResetDictionary()
-        table.clear(gifPrefix)
-        table.clear(gifSuffix)
+        gifDictionary = {}
         for literalIndex = 0, gifClearCode - 1 do
-            gifSuffix[literalIndex] = literalIndex
+            gifDictionary[literalIndex] = string.char(literalIndex)
         end
         gifCodeSize = gifMinimumCodeSize + 1
         gifNextCode = gifEndCode + 1
-        gifPreviousCode = nil
-    end
-
-    local function assetBridgeGifExpandCode(expansionCode)
-        local stackCount = 0
-        local currentCode = expansionCode
-
-        while currentCode >= gifClearCode do
-            if currentCode >= gifNextCode or gifSuffix[currentCode] == nil then
-                return nil, "Invalid GIF LZW dictionary reference."
-            end
-            stackCount = stackCount + 1
-            gifExpansionStack[stackCount] = gifSuffix[currentCode]
-            currentCode = gifPrefix[currentCode]
-            if currentCode == nil then
-                return nil, "Invalid GIF LZW dictionary chain."
-            end
-        end
-
-        stackCount = stackCount + 1
-        gifExpansionStack[stackCount] = gifSuffix[currentCode]
-        return stackCount, gifExpansionStack[stackCount]
+        gifPreviousEntry = nil
     end
 
     assetBridgeGifResetDictionary()
 
+    local processedCodeCount = 0
     while true do
         local currentCode = assetBridgeGifReadCode(gifCodeSize)
-        gifProcessedCodeCount = gifProcessedCodeCount + 1
-        if gifYieldEveryCodes and gifYieldEveryCodes > 0 and gifProcessedCodeCount % gifYieldEveryCodes == 0 then
+        processedCodeCount = processedCodeCount + 1
+        if gifYieldEveryCodes and gifYieldEveryCodes > 0 and processedCodeCount % gifYieldEveryCodes == 0 then
             task.wait()
         end
         if currentCode == nil then
@@ -795,39 +633,25 @@ local function assetBridgeGifDecodeLZW(gifCompressedBytes, gifMinimumCodeSize, g
         elseif currentCode == gifEndCode then
             break
         else
-            local currentStackCount
-            local currentFirstByte
-            local isNextCodeCase = currentCode == gifNextCode and gifPreviousCode ~= nil
+            local currentEntry = gifDictionary[currentCode]
 
-            if isNextCodeCase then
-                currentStackCount, currentFirstByte = assetBridgeGifExpandCode(gifPreviousCode)
-            elseif currentCode < gifNextCode then
-                currentStackCount, currentFirstByte = assetBridgeGifExpandCode(currentCode)
-            else
+            if not currentEntry and currentCode == gifNextCode and gifPreviousEntry then
+                currentEntry = gifPreviousEntry .. string.sub(gifPreviousEntry, 1, 1)
+            end
+
+            if not currentEntry then
                 return nil, "Invalid GIF LZW code encountered."
             end
 
-            if not currentStackCount then
-                return nil, currentFirstByte
+            gifOutputParts[#gifOutputParts + 1] = currentEntry
+            gifOutputLength = gifOutputLength + #currentEntry
+
+            if gifOutputLength > gifExpectedPixelCount then
+                return nil, "GIF frame decoded to more pixels than its dimensions allow."
             end
 
-            for stackIndex = currentStackCount, 1, -1 do
-                local appendSuccess, appendError = assetBridgeGifAppendOutputByte(gifExpansionStack[stackIndex])
-                if not appendSuccess then
-                    return nil, appendError
-                end
-            end
-
-            if isNextCodeCase then
-                local appendSuccess, appendError = assetBridgeGifAppendOutputByte(currentFirstByte)
-                if not appendSuccess then
-                    return nil, appendError
-                end
-            end
-
-            if gifPreviousCode ~= nil and gifNextCode < 4096 then
-                gifPrefix[gifNextCode] = gifPreviousCode
-                gifSuffix[gifNextCode] = currentFirstByte
+            if gifPreviousEntry and gifNextCode < 4096 then
+                gifDictionary[gifNextCode] = gifPreviousEntry .. string.sub(currentEntry, 1, 1)
                 gifNextCode = gifNextCode + 1
 
                 if gifNextCode >= 2 ^ gifCodeSize and gifCodeSize < 12 then
@@ -835,17 +659,11 @@ local function assetBridgeGifDecodeLZW(gifCompressedBytes, gifMinimumCodeSize, g
                 end
             end
 
-            gifPreviousCode = currentCode
+            gifPreviousEntry = currentEntry
         end
     end
 
-    local decodedPixels
-    if gifOutputBuffer then
-        decodedPixels = assetBridgeBufferLibrary.tostring(gifOutputBuffer)
-    else
-        assetBridgeGifFlushOutputChunk()
-        decodedPixels = table.concat(gifOutputParts)
-    end
+    local decodedPixels = table.concat(gifOutputParts)
     if #decodedPixels < gifExpectedPixelCount then
         return nil, "GIF frame did not contain enough decoded pixels."
     end
@@ -853,81 +671,17 @@ local function assetBridgeGifDecodeLZW(gifCompressedBytes, gifMinimumCodeSize, g
     return decodedPixels
 end
 
-local assetBridgeGifPackedPixelCache = {}
-
-local function assetBridgeGifGetPackedPixel(pixelBytes)
-    local packedPixel = assetBridgeGifPackedPixelCache[pixelBytes]
-    if packedPixel ~= nil then
-        return packedPixel
-    end
-
-    local redValue, greenValue, blueValue, alphaValue = string.byte(pixelBytes, 1, 4)
-    packedPixel = redValue + greenValue * 256 + blueValue * 65536 + alphaValue * 16777216
-    assetBridgeGifPackedPixelCache[pixelBytes] = packedPixel
-    return packedPixel
-end
-
-local function assetBridgeGifGetCanvasBuffer(gifCanvasRows)
-    if type(gifCanvasRows) == "table" then
-        return rawget(gifCanvasRows, "_buffer")
-    end
-    return nil
-end
-
 local function assetBridgeGifCloneCanvas(gifCanvasRows, gifHeight)
-    local originalBuffer = assetBridgeGifGetCanvasBuffer(gifCanvasRows)
-    if originalBuffer
-        and assetBridgeBufferLibrary
-        and type(assetBridgeBufferLibrary.len) == "function"
-        and type(assetBridgeBufferLibrary.copy) == "function" then
-        local canvasBufferSize = assetBridgeBufferLibrary.len(originalBuffer)
-        local clonedBuffer = assetBridgeBufferLibrary.create(canvasBufferSize)
-        assetBridgeBufferLibrary.copy(clonedBuffer, 0, originalBuffer, 0, canvasBufferSize)
-        return {
-            _buffer = clonedBuffer,
-            _width = gifCanvasRows._width,
-            _height = gifCanvasRows._height
-        }
-    end
-
     local clonedCanvasRows = {}
     for gifRowIndex = 1, gifHeight do
-        local originalRow = gifCanvasRows[gifRowIndex]
-        local clonedRow = {}
-        for gifColumnIndex = 1, #originalRow do
-            clonedRow[gifColumnIndex] = originalRow[gifColumnIndex]
-        end
-        clonedCanvasRows[gifRowIndex] = clonedRow
+        clonedCanvasRows[gifRowIndex] = gifCanvasRows[gifRowIndex]
     end
     return clonedCanvasRows
 end
 
 local function assetBridgeGifCreateCanvas(gifWidth, gifHeight, gifFillPixel)
-    if assetBridgeBufferLibrary
-        and type(assetBridgeBufferLibrary.create) == "function"
-        and type(assetBridgeBufferLibrary.writeu32) == "function"
-        and type(assetBridgeBufferLibrary.readu32) == "function"
-        and type(assetBridgeBufferLibrary.readstring) == "function"
-        and type(assetBridgeBufferLibrary.len) == "function"
-        and type(assetBridgeBufferLibrary.copy) == "function" then
-        local canvasByteCount = gifWidth * gifHeight * 4
-        local createSuccess, canvasBuffer = pcall(assetBridgeBufferLibrary.create, canvasByteCount)
-        if createSuccess and canvasBuffer then
-            local packedFillPixel = assetBridgeGifGetPackedPixel(gifFillPixel)
-            if packedFillPixel ~= 0 then
-                for pixelIndex = 0, gifWidth * gifHeight - 1 do
-                    assetBridgeBufferLibrary.writeu32(canvasBuffer, pixelIndex * 4, packedFillPixel)
-                end
-            end
-            return {
-                _buffer = canvasBuffer,
-                _width = gifWidth,
-                _height = gifHeight
-            }
-        end
-    end
-
     local gifCanvasRows = {}
+
     for gifY = 1, gifHeight do
         local gifRow = {}
         for gifX = 1, gifWidth do
@@ -935,6 +689,7 @@ local function assetBridgeGifCreateCanvas(gifWidth, gifHeight, gifFillPixel)
         end
         gifCanvasRows[gifY] = gifRow
     end
+
     return gifCanvasRows
 end
 
@@ -943,25 +698,17 @@ local function assetBridgeGifFillCanvasRect(gifCanvasRows, gifCanvasWidth, gifCa
     local clippedStartY = math.max(0, gifRectY)
     local clippedEndX = math.min(gifCanvasWidth, gifRectX + gifRectWidth)
     local clippedEndY = math.min(gifCanvasHeight, gifRectY + gifRectHeight)
-    local canvasBuffer = assetBridgeGifGetCanvasBuffer(gifCanvasRows)
-
-    if canvasBuffer and assetBridgeBufferLibrary then
-        local packedFillPixel = assetBridgeGifGetPackedPixel(gifFillPixel)
-        for gifY = clippedStartY, clippedEndY - 1 do
-            local pixelOffset = (gifY * gifCanvasWidth + clippedStartX) * 4
-            for gifX = clippedStartX, clippedEndX - 1 do
-                assetBridgeBufferLibrary.writeu32(canvasBuffer, pixelOffset, packedFillPixel)
-                pixelOffset = pixelOffset + 4
-            end
-        end
-        return
-    end
 
     for gifY = clippedStartY, clippedEndY - 1 do
-        local gifRow = gifCanvasRows[gifY + 1]
+        local gifRow = {}
+        local originalRow = gifCanvasRows[gifY + 1]
+        for gifX = 1, gifCanvasWidth do
+            gifRow[gifX] = originalRow[gifX]
+        end
         for gifX = clippedStartX, clippedEndX - 1 do
             gifRow[gifX + 1] = gifFillPixel
         end
+        gifCanvasRows[gifY + 1] = gifRow
     end
 end
 
@@ -1048,247 +795,40 @@ local function assetBridgeGifCreatePNGChunk(gifChunkType, gifChunkData, yieldEve
     return assetBridgeGifPackUInt32BE(#gifChunkData) .. chunkPayload .. assetBridgeGifPackUInt32BE(chunkChecksum)
 end
 
-local function assetBridgeGifReverseBits(value, bitCount)
-    local reversedValue = 0
-    for bitIndex = 1, bitCount do
-        reversedValue = reversedValue * 2 + (value % 2)
-        value = math.floor(value / 2)
+local function assetBridgeGifEncodeStoredZlib(gifRawImageBytes, yieldEveryBytes)
+    local deflateBlocks = {}
+    local rawOffset = 1
+
+    while rawOffset <= #gifRawImageBytes do
+        local blockLength = math.min(65535, #gifRawImageBytes - rawOffset + 1)
+        local isFinalBlock = rawOffset + blockLength - 1 >= #gifRawImageBytes
+        local blockHeader = isFinalBlock and 1 or 0
+        local inverseBlockLength = 65535 - blockLength
+
+        deflateBlocks[#deflateBlocks + 1] = string.char(blockHeader)
+            .. assetBridgeGifPackUInt16LE(blockLength)
+            .. assetBridgeGifPackUInt16LE(inverseBlockLength)
+            .. string.sub(gifRawImageBytes, rawOffset, rawOffset + blockLength - 1)
+
+        rawOffset = rawOffset + blockLength
     end
-    return reversedValue
+
+    return string.char(120, 1) .. table.concat(deflateBlocks) .. assetBridgeGifPackUInt32BE(assetBridgeGifAdler32(gifRawImageBytes, yieldEveryBytes))
 end
 
-local assetBridgeGifFixedHuffmanCodes = {}
-local assetBridgeGifFixedHuffmanLengths = {}
-for fixedSymbol = 0, 287 do
-    local fixedCodeValue
-    local fixedCodeLength
-    if fixedSymbol <= 143 then
-        fixedCodeValue = 48 + fixedSymbol
-        fixedCodeLength = 8
-    elseif fixedSymbol <= 255 then
-        fixedCodeValue = 400 + fixedSymbol - 144
-        fixedCodeLength = 9
-    elseif fixedSymbol <= 279 then
-        fixedCodeValue = fixedSymbol - 256
-        fixedCodeLength = 7
-    else
-        fixedCodeValue = 192 + fixedSymbol - 280
-        fixedCodeLength = 8
-    end
-    assetBridgeGifFixedHuffmanCodes[fixedSymbol] = assetBridgeGifReverseBits(fixedCodeValue, fixedCodeLength)
-    assetBridgeGifFixedHuffmanLengths[fixedSymbol] = fixedCodeLength
-end
+local function assetBridgeGifEncodePNG(gifWidth, gifHeight, gifCanvasRows, yieldEveryRows)
+    local pngScanlines = {}
 
-local function assetBridgeGifEncodeZlib(gifRawImageBytes, yieldEveryBytes, useFastCompression)
-    local outputBytes = {}
-    local bitBuffer = 0
-    local bitCount = 0
-    local processedByteCount = 0
-    local nextYieldAt = yieldEveryBytes and yieldEveryBytes > 0 and yieldEveryBytes or math.huge
-
-    local function writeBits(value, count)
-        if count <= 0 then return end
-        bitBuffer = bitBuffer + (value % (2 ^ count)) * (2 ^ bitCount)
-        bitCount = bitCount + count
-        while bitCount >= 8 do
-            outputBytes[#outputBytes + 1] = string.char(bitBuffer % 256)
-            bitBuffer = math.floor(bitBuffer / 256)
-            bitCount = bitCount - 8
-        end
-    end
-
-    local function writeSymbol(symbol)
-        writeBits(assetBridgeGifFixedHuffmanCodes[symbol], assetBridgeGifFixedHuffmanLengths[symbol])
-    end
-
-    local lengthBases = {3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 15, 17, 19, 23, 27, 31, 35, 43, 51, 59, 67, 83, 99, 115, 131, 163, 195, 227, 258}
-    local lengthExtraBits = {0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3, 4, 4, 4, 4, 5, 5, 5, 5, 0}
-    local distanceBases = {1, 2, 3, 4, 5, 7, 9, 13, 17, 25, 33, 49, 65, 97, 129, 193, 257, 385, 513, 769, 1025, 1537, 2049, 3073, 4097, 6145, 8193, 12289, 16385, 24577}
-    local distanceExtraBits = {0, 0, 0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7, 8, 8, 9, 9, 10, 10, 11, 11, 12, 12, 13, 13}
-
-    local function writeLengthDistance(matchLength, matchDistance)
-        local lengthCodeIndex = 1
-        while lengthCodeIndex < #lengthBases do
-            local extraCount = lengthExtraBits[lengthCodeIndex]
-            if matchLength < lengthBases[lengthCodeIndex] + (2 ^ extraCount) then break end
-            lengthCodeIndex = lengthCodeIndex + 1
-        end
-        writeSymbol(256 + lengthCodeIndex)
-        local lengthExtraCount = lengthExtraBits[lengthCodeIndex]
-        if lengthExtraCount > 0 then
-            writeBits(matchLength - lengthBases[lengthCodeIndex], lengthExtraCount)
-        end
-
-        local distanceCodeIndex = 1
-        while distanceCodeIndex < #distanceBases do
-            local extraCount = distanceExtraBits[distanceCodeIndex]
-            if matchDistance < distanceBases[distanceCodeIndex] + (2 ^ extraCount) then break end
-            distanceCodeIndex = distanceCodeIndex + 1
-        end
-        writeBits(assetBridgeGifReverseBits(distanceCodeIndex - 1, 5), 5)
-        local distanceExtraCount = distanceExtraBits[distanceCodeIndex]
-        if distanceExtraCount > 0 then
-            writeBits(matchDistance - distanceBases[distanceCodeIndex], distanceExtraCount)
-        end
-    end
-
-    writeBits(1, 1)
-    writeBits(1, 2)
-
-    local rawByteCount = #gifRawImageBytes
-    if useFastCompression then
-        local rawPosition = 1
-        while rawPosition <= rawByteCount do
-            local runByte = string.byte(gifRawImageBytes, rawPosition)
-            local runEndPosition = rawPosition + 1
-            while runEndPosition <= rawByteCount
-                and string.byte(gifRawImageBytes, runEndPosition) == runByte do
-                runEndPosition = runEndPosition + 1
-            end
-
-            local runLength = runEndPosition - rawPosition
-            if runLength >= 4 then
-                writeSymbol(runByte)
-                local remainingRunLength = runLength - 1
-                while remainingRunLength >= 3 do
-                    local matchLength = math.min(258, remainingRunLength)
-                    writeLengthDistance(matchLength, 1)
-                    remainingRunLength = remainingRunLength - matchLength
-                end
-                while remainingRunLength > 0 do
-                    writeSymbol(runByte)
-                    remainingRunLength = remainingRunLength - 1
-                end
-            else
-                for runByteIndex = 1, runLength do
-                    writeSymbol(runByte)
-                end
-            end
-
-            rawPosition = runEndPosition
-            processedByteCount = processedByteCount + runLength
-            if yieldEveryBytes and yieldEveryBytes > 0 and processedByteCount >= nextYieldAt then
-                task.wait()
-                nextYieldAt = nextYieldAt + yieldEveryBytes
-            end
-        end
-    else
-        local latestPositionBySequence = {}
-        local rawPosition = 1
-        while rawPosition <= rawByteCount do
-            local matchedLength = 0
-            local matchedDistance = 0
-            local sequenceKey
-            if rawPosition + 2 <= rawByteCount then
-                local sequenceByteOne, sequenceByteTwo, sequenceByteThree = string.byte(gifRawImageBytes, rawPosition, rawPosition + 2)
-                sequenceKey = (sequenceByteOne * 251 + sequenceByteTwo * 31 + sequenceByteThree) % 65536
-                local previousPosition = latestPositionBySequence[sequenceKey]
-                if previousPosition and rawPosition - previousPosition <= 32768 then
-                    local maximumMatchLength = math.min(258, rawByteCount - rawPosition + 1)
-                    while matchedLength < maximumMatchLength
-                        and string.byte(gifRawImageBytes, previousPosition + matchedLength) == string.byte(gifRawImageBytes, rawPosition + matchedLength) do
-                        matchedLength = matchedLength + 1
-                    end
-                    if matchedLength >= 3 then
-                        matchedDistance = rawPosition - previousPosition
-                    else
-                        matchedLength = 0
-                    end
-                end
-            end
-
-            if matchedLength >= 3 then
-                writeLengthDistance(matchedLength, matchedDistance)
-                local matchEndPosition = rawPosition + matchedLength - 1
-                while rawPosition <= matchEndPosition do
-                    if rawPosition + 2 <= rawByteCount then
-                        local sequenceByteOne, sequenceByteTwo, sequenceByteThree = string.byte(gifRawImageBytes, rawPosition, rawPosition + 2)
-                        local sequenceHash = (sequenceByteOne * 251 + sequenceByteTwo * 31 + sequenceByteThree) % 65536
-                        latestPositionBySequence[sequenceHash] = rawPosition
-                    end
-                    rawPosition = rawPosition + 1
-                end
-                processedByteCount = processedByteCount + matchedLength
-            else
-                writeSymbol(string.byte(gifRawImageBytes, rawPosition))
-                if sequenceKey then latestPositionBySequence[sequenceKey] = rawPosition end
-                rawPosition = rawPosition + 1
-                processedByteCount = processedByteCount + 1
-            end
-
-            if yieldEveryBytes and yieldEveryBytes > 0 and processedByteCount >= nextYieldAt then
-                task.wait()
-                nextYieldAt = nextYieldAt + yieldEveryBytes
-            end
-        end
-    end
-
-    writeSymbol(256)
-    if bitCount > 0 then outputBytes[#outputBytes + 1] = string.char(bitBuffer % 256) end
-
-    local deflateBytes = table.concat(outputBytes)
-    return string.char(120, 156) .. deflateBytes .. assetBridgeGifPackUInt32BE(assetBridgeGifAdler32(gifRawImageBytes, yieldEveryBytes))
-end
-local assetBridgeGifSingleByteStrings = {}
-for gifByteValue = 0, 255 do
-    assetBridgeGifSingleByteStrings[gifByteValue] = string.char(gifByteValue)
-end
-
-local function assetBridgeGifEncodeTrueColorPNG(gifWidth, gifHeight, gifCanvasRows, yieldEveryRows)
-    local canvasBuffer = assetBridgeGifGetCanvasBuffer(gifCanvasRows)
-    local rawImageBuffer = nil
-    local pngScanlines = nil
-    local pngRowStride = gifWidth * 4 + 1
-
-    if assetBridgeBufferLibrary
-        and type(assetBridgeBufferLibrary.create) == "function"
-        and type(assetBridgeBufferLibrary.writeu8) == "function"
-        and type(assetBridgeBufferLibrary.tostring) == "function" then
-        local outputBufferSuccess, outputBuffer = pcall(assetBridgeBufferLibrary.create, pngRowStride * gifHeight)
-        if outputBufferSuccess then
-            rawImageBuffer = outputBuffer
-        end
-    end
-
-    if not rawImageBuffer then
-        pngScanlines = {}
-    end
-
-    local pngRowOffset = 0
     for gifY = 1, gifHeight do
-        local rgbaRowBytes
-        if canvasBuffer and assetBridgeBufferLibrary then
-            rgbaRowBytes = assetBridgeBufferLibrary.readstring(canvasBuffer, (gifY - 1) * gifWidth * 4, gifWidth * 4)
-        else
-            rgbaRowBytes = table.concat(gifCanvasRows[gifY])
-        end
-
-        if rawImageBuffer then
-            assetBridgeBufferLibrary.writeu8(rawImageBuffer, pngRowOffset, 1)
-            for rgbaByteIndex = 1, #rgbaRowBytes do
-                local rgbaByteValue = string.byte(rgbaRowBytes, rgbaByteIndex)
-                local rgbaLeftByte = rgbaByteIndex > 4 and string.byte(rgbaRowBytes, rgbaByteIndex - 4) or 0
-                assetBridgeBufferLibrary.writeu8(rawImageBuffer, pngRowOffset + rgbaByteIndex, (rgbaByteValue - rgbaLeftByte) % 256)
-            end
-        else
-            local filteredRowParts = {"\1"}
-            for rgbaByteIndex = 1, #rgbaRowBytes do
-                local rgbaByteValue = string.byte(rgbaRowBytes, rgbaByteIndex)
-                local rgbaLeftByte = rgbaByteIndex > 4 and string.byte(rgbaRowBytes, rgbaByteIndex - 4) or 0
-                filteredRowParts[#filteredRowParts + 1] = assetBridgeGifSingleByteStrings[(rgbaByteValue - rgbaLeftByte) % 256]
-            end
-            pngScanlines[#pngScanlines + 1] = table.concat(filteredRowParts)
-        end
-
-        pngRowOffset = pngRowOffset + pngRowStride
+        pngScanlines[#pngScanlines + 1] = "\0" .. table.concat(gifCanvasRows[gifY])
         if yieldEveryRows and yieldEveryRows > 0 and gifY % yieldEveryRows == 0 then
             task.wait()
         end
     end
 
-    local rawImageBytes = rawImageBuffer and assetBridgeBufferLibrary.tostring(rawImageBuffer) or table.concat(pngScanlines)
+    local rawImageBytes = table.concat(pngScanlines)
     local yieldEveryBytes = yieldEveryRows and yieldEveryRows > 0 and math.max(4096, yieldEveryRows * gifWidth * 4) or nil
-    local compressedImageBytes = assetBridgeGifEncodeZlib(rawImageBytes, yieldEveryBytes)
+    local compressedImageBytes = assetBridgeGifEncodeStoredZlib(rawImageBytes, yieldEveryBytes)
     local pngHeaderData = assetBridgeGifPackUInt32BE(gifWidth)
         .. assetBridgeGifPackUInt32BE(gifHeight)
         .. string.char(8, 6, 0, 0, 0)
@@ -1308,157 +848,7 @@ local function assetBridgeGifEncodeTrueColorPNG(gifWidth, gifHeight, gifCanvasRo
         return nil, endError
     end
 
-    return "\137PNG\r\n\26\n" .. headerChunk .. imageChunk .. endChunk, nil, "rgba"
-end
-
-local function assetBridgeGifEncodeIndexedPNG(gifWidth, gifHeight, gifCanvasRows, yieldEveryRows)
-    local paletteIndexes = {}
-    local paletteRedGreenBlue = {}
-    local paletteAlpha = {}
-    local paletteCount = 0
-    local lastTransparentPaletteIndex = 0
-    local indexedScanlines = nil
-    local canvasBuffer = assetBridgeGifGetCanvasBuffer(gifCanvasRows)
-    local indexedRowStride = gifWidth + 1
-    local indexedImageBuffer = nil
-
-    if assetBridgeBufferLibrary
-        and type(assetBridgeBufferLibrary.create) == "function"
-        and type(assetBridgeBufferLibrary.writeu8) == "function"
-        and type(assetBridgeBufferLibrary.tostring) == "function" then
-        local outputBufferSuccess, outputBuffer = pcall(assetBridgeBufferLibrary.create, indexedRowStride * gifHeight)
-        if outputBufferSuccess then
-            indexedImageBuffer = outputBuffer
-        end
-    end
-
-    if not indexedImageBuffer then
-        indexedScanlines = {}
-    end
-
-    local indexedRowOffset = 0
-    for gifY = 1, gifHeight do
-        local indexedRowParts = indexedImageBuffer and nil or {}
-        local previousPaletteIndex = 0
-        local canvasRow = not canvasBuffer and gifCanvasRows[gifY] or nil
-
-        if indexedImageBuffer then
-            assetBridgeBufferLibrary.writeu8(indexedImageBuffer, indexedRowOffset, 1)
-        end
-
-        for gifX = 1, gifWidth do
-            local rgbaPixel
-            if canvasBuffer and assetBridgeBufferLibrary then
-                rgbaPixel = assetBridgeBufferLibrary.readu32(canvasBuffer, ((gifY - 1) * gifWidth + gifX - 1) * 4)
-            else
-                rgbaPixel = canvasRow[gifX]
-            end
-            local paletteIndex = paletteIndexes[rgbaPixel]
-
-            if paletteIndex == nil then
-                if paletteCount >= 256 then
-                    return nil, "The composed GIF frame uses more than 256 colors."
-                end
-
-                paletteCount = paletteCount + 1
-                paletteIndex = paletteCount
-                paletteIndexes[rgbaPixel] = paletteIndex
-
-                local redValue, greenValue, blueValue, alphaValue
-                if canvasBuffer then
-                    redValue = rgbaPixel % 256
-                    greenValue = math.floor(rgbaPixel / 256) % 256
-                    blueValue = math.floor(rgbaPixel / 65536) % 256
-                    alphaValue = math.floor(rgbaPixel / 16777216) % 256
-                else
-                    redValue, greenValue, blueValue, alphaValue = string.byte(rgbaPixel, 1, 4)
-                end
-                paletteRedGreenBlue[paletteCount] = string.char(redValue, greenValue, blueValue)
-                paletteAlpha[paletteCount] = string.char(alphaValue)
-                if alphaValue ~= 255 then
-                    lastTransparentPaletteIndex = paletteCount
-                end
-            end
-
-            local zeroBasedPaletteIndex = paletteIndex - 1
-            local subFilteredPaletteIndex = (zeroBasedPaletteIndex - previousPaletteIndex) % 256
-            if indexedImageBuffer then
-                assetBridgeBufferLibrary.writeu8(indexedImageBuffer, indexedRowOffset + gifX, subFilteredPaletteIndex)
-            else
-                indexedRowParts[#indexedRowParts + 1] = assetBridgeGifSingleByteStrings[subFilteredPaletteIndex]
-            end
-            previousPaletteIndex = zeroBasedPaletteIndex
-        end
-
-        if not indexedImageBuffer then
-            indexedScanlines[#indexedScanlines + 1] = "\1" .. table.concat(indexedRowParts)
-        end
-        indexedRowOffset = indexedRowOffset + indexedRowStride
-        if yieldEveryRows and yieldEveryRows > 0 and gifY % yieldEveryRows == 0 then
-            task.wait()
-        end
-    end
-
-    local rawImageBytes = indexedImageBuffer and assetBridgeBufferLibrary.tostring(indexedImageBuffer) or table.concat(indexedScanlines)
-    local yieldEveryBytes = yieldEveryRows and yieldEveryRows > 0 and math.max(4096, yieldEveryRows * gifWidth) or nil
-    local compressedImageBytes = assetBridgeGifEncodeZlib(rawImageBytes, yieldEveryBytes)
-    local pngHeaderData = assetBridgeGifPackUInt32BE(gifWidth)
-        .. assetBridgeGifPackUInt32BE(gifHeight)
-        .. string.char(8, 3, 0, 0, 0)
-
-    local headerChunk, headerError = assetBridgeGifCreatePNGChunk("IHDR", pngHeaderData, yieldEveryBytes)
-    if not headerChunk then
-        return nil, headerError
-    end
-
-    local paletteChunk, paletteError = assetBridgeGifCreatePNGChunk("PLTE", table.concat(paletteRedGreenBlue), yieldEveryBytes)
-    if not paletteChunk then
-        return nil, paletteError
-    end
-
-    local transparencyChunk = ""
-    if lastTransparentPaletteIndex > 0 then
-        local transparencyData = {}
-        for paletteIndex = 1, lastTransparentPaletteIndex do
-            transparencyData[paletteIndex] = paletteAlpha[paletteIndex]
-        end
-        local createdTransparencyChunk, transparencyError = assetBridgeGifCreatePNGChunk("tRNS", table.concat(transparencyData), yieldEveryBytes)
-        if not createdTransparencyChunk then
-            return nil, transparencyError
-        end
-        transparencyChunk = createdTransparencyChunk
-    end
-
-    local imageChunk, imageError = assetBridgeGifCreatePNGChunk("IDAT", compressedImageBytes, yieldEveryBytes)
-    if not imageChunk then
-        return nil, imageError
-    end
-
-    local endChunk, endError = assetBridgeGifCreatePNGChunk("IEND", "", yieldEveryBytes)
-    if not endChunk then
-        return nil, endError
-    end
-
-    return "\137PNG\r\n\26\n" .. headerChunk .. paletteChunk .. transparencyChunk .. imageChunk .. endChunk, "indexed"
-end
-
-local function assetBridgeGifEncodePNG(gifWidth, gifHeight, gifCanvasRows, yieldEveryRows)
-    local indexedPngBytes, indexedPngModeOrError = assetBridgeGifEncodeIndexedPNG(
-        gifWidth,
-        gifHeight,
-        gifCanvasRows,
-        yieldEveryRows
-    )
-
-    if indexedPngBytes then
-        return indexedPngBytes, nil, indexedPngModeOrError
-    end
-
-    if indexedPngModeOrError ~= "The composed GIF frame uses more than 256 colors." then
-        return nil, indexedPngModeOrError
-    end
-
-    return assetBridgeGifEncodeTrueColorPNG(gifWidth, gifHeight, gifCanvasRows, yieldEveryRows)
+    return "\137PNG\r\n\26\n" .. headerChunk .. imageChunk .. endChunk
 end
 
 local function assetBridgeGifDecode(gifBytes, gifOptions)
@@ -1490,12 +880,18 @@ local function assetBridgeGifDecode(gifBytes, gifOptions)
         return nil, "GIF dimensions must be greater than zero."
     end
 
+    local maximumGifPixels = tonumber(gifOptions.MaxPixels) or tonumber(AssetBridge.Config.GIFMaxPixels) or 1048576
+    local maximumGifFrames = tonumber(gifOptions.MaxFrames) or tonumber(AssetBridge.Config.GIFMaxFrames) or 120
+    local maximumGifOutputBytes = tonumber(gifOptions.MaxOutputBytes) or tonumber(AssetBridge.Config.GIFMaxOutputBytes) or 40000000
+
     local logicalScreenPixels = gifCanvasWidth * gifCanvasHeight
+    if logicalScreenPixels > maximumGifPixels then
+        return nil, "GIF dimensions exceed the configured GIFMaxPixels limit."
+    end
 
     local globalColorTable = nil
-    local globalColorCount = 0
     if bit32.band(gifScreenPacked, 128) ~= 0 then
-        globalColorCount = 2 ^ (bit32.band(gifScreenPacked, 7) + 1)
+        local globalColorCount = 2 ^ (bit32.band(gifScreenPacked, 7) + 1)
         local colorTableError
         globalColorTable, gifPosition, colorTableError = assetBridgeGifReadColorTable(gifBytes, gifPosition, globalColorCount)
         if not globalColorTable then
@@ -1618,6 +1014,10 @@ local function assetBridgeGifDecode(gifBytes, gifOptions)
                 previousGraphicFrame = nil
             end
 
+            if #gifFrames >= maximumGifFrames then
+                return nil, "GIF exceeds the configured GIFMaxFrames limit."
+            end
+
             local frameX = assetBridgeGifReadUInt16(gifBytes, gifPosition)
             local frameY = assetBridgeGifReadUInt16(gifBytes, gifPosition + 2)
             local frameWidth = assetBridgeGifReadUInt16(gifBytes, gifPosition + 4)
@@ -1638,13 +1038,16 @@ local function assetBridgeGifDecode(gifBytes, gifOptions)
             end
 
             local framePixelCount = frameWidth * frameHeight
+            if framePixelCount > maximumGifPixels then
+                return nil, "GIF frame dimensions exceed the configured GIFMaxPixels limit."
+            end
+
             gifTotalPixels = gifTotalPixels + logicalScreenPixels
 
 
             local localColorTable = nil
-            local localColorCount = 0
             if bit32.band(imagePacked, 128) ~= 0 then
-                localColorCount = 2 ^ (bit32.band(imagePacked, 7) + 1)
+                local localColorCount = 2 ^ (bit32.band(imagePacked, 7) + 1)
                 local localColorTableError
                 localColorTable, gifPosition, localColorTableError = assetBridgeGifReadColorTable(gifBytes, gifPosition, localColorCount)
                 if not localColorTable then
@@ -1747,6 +1150,9 @@ local function assetBridgeGifDecode(gifBytes, gifOptions)
             end
 
             gifTotalOutputBytes = gifTotalOutputBytes + #pngFrameBytes
+            if gifTotalOutputBytes > maximumGifOutputBytes then
+                return nil, "Decoded GIF frames exceed the configured GIFMaxOutputBytes limit."
+            end
 
             local frameDelaySeconds = gifGraphicControl.Delay / 100
             if frameDelaySeconds <= 0 then
@@ -1836,11 +1242,16 @@ local function assetBridgeGifScanFrames(gifBytes, gifOptions)
     end
 
     local logicalScreenPixels = gifCanvasWidth * gifCanvasHeight
+    local maximumGifPixels = tonumber(gifOptions.MaxPixels) or tonumber(AssetBridge.Config.GIFMaxPixels) or 1048576
+    local maximumGifFrames = tonumber(gifOptions.MaxFrames) or tonumber(AssetBridge.Config.GIFMaxFrames) or 120
+
+    if logicalScreenPixels > maximumGifPixels then
+        return nil, "GIF dimensions exceed the configured GIFMaxPixels limit."
+    end
 
     local globalColorTable = nil
-    local globalColorCount = 0
     if bit32.band(gifScreenPacked, 128) ~= 0 then
-        globalColorCount = 2 ^ (bit32.band(gifScreenPacked, 7) + 1)
+        local globalColorCount = 2 ^ (bit32.band(gifScreenPacked, 7) + 1)
         local globalColorTableError
         globalColorTable, gifPosition, globalColorTableError = assetBridgeGifReadColorTable(gifBytes, gifPosition, globalColorCount)
         if not globalColorTable then
@@ -1927,6 +1338,10 @@ local function assetBridgeGifScanFrames(gifBytes, gifOptions)
                 gifPosition = nextPosition
             end
         elseif blockIntroducer == 44 then
+            if #gifFrames >= maximumGifFrames then
+                return nil, "GIF exceeds the configured GIFMaxFrames limit."
+            end
+
             local frameX = assetBridgeGifReadUInt16(gifBytes, gifPosition)
             local frameY = assetBridgeGifReadUInt16(gifBytes, gifPosition + 2)
             local frameWidth = assetBridgeGifReadUInt16(gifBytes, gifPosition + 4)
@@ -1947,12 +1362,15 @@ local function assetBridgeGifScanFrames(gifBytes, gifOptions)
             end
 
             local framePixelCount = frameWidth * frameHeight
+            if framePixelCount > maximumGifPixels then
+                return nil, "GIF frame dimensions exceed the configured GIFMaxPixels limit."
+            end
+
             gifTotalPixels = gifTotalPixels + logicalScreenPixels
 
             local localColorTable = nil
-            local localColorCount = 0
             if bit32.band(imagePacked, 128) ~= 0 then
-                localColorCount = 2 ^ (bit32.band(imagePacked, 7) + 1)
+                local localColorCount = 2 ^ (bit32.band(imagePacked, 7) + 1)
                 local localColorTableError
                 localColorTable, gifPosition, localColorTableError = assetBridgeGifReadColorTable(gifBytes, gifPosition, localColorCount)
                 if not localColorTable then
@@ -1991,7 +1409,6 @@ local function assetBridgeGifScanFrames(gifBytes, gifOptions)
                 Height = frameHeight,
                 Interlaced = bit32.band(imagePacked, 64) ~= 0,
                 ColorTable = frameColorTable,
-                ColorCount = localColorCount > 0 and localColorCount or globalColorCount,
                 CompressedData = compressedFrameData,
                 LzwMinimumCodeSize = lzwMinimumCodeSize,
                 Duration = frameDelaySeconds,
@@ -2031,253 +1448,197 @@ local function assetBridgeGifScanFrames(gifBytes, gifOptions)
     }
 end
 
-local function assetBridgeGifEncodeIndexedFramePNG(frameMetadata, decodedFramePixels, sourceRowOffsets, yieldEveryRows, useFastCompression)
-    local frameWidth = frameMetadata.Width
-    local frameHeight = frameMetadata.Height
-    local frameColorCount = tonumber(frameMetadata.ColorCount) or 0
-    local frameColorTable = frameMetadata.ColorTable
-    if frameColorCount < 1 or frameColorCount > 256 then
-        return nil, "GIF frame has an invalid palette size."
-    end
-
-    local paletteParts = table.create(frameColorCount)
-    for paletteIndex = 0, frameColorCount - 1 do
-        local palettePixel = frameColorTable[paletteIndex]
-        if type(palettePixel) ~= "string" or #palettePixel < 3 then
-            return nil, "GIF frame references an incomplete palette entry."
-        end
-        paletteParts[paletteIndex + 1] = string.sub(palettePixel, 1, 3)
-    end
-
-    local transparencyChunk = ""
-    local transparentIndex = frameMetadata.TransparentIndex
-    if transparentIndex ~= nil then
-        if transparentIndex < 0 or transparentIndex >= frameColorCount then
-            return nil, "GIF frame transparency index is outside its color table."
-        end
-        local transparencyParts = table.create(transparentIndex + 1)
-        for paletteIndex = 0, transparentIndex do
-            transparencyParts[paletteIndex + 1] = paletteIndex == transparentIndex and "\0" or "\255"
-        end
-        local transparencyData = table.concat(transparencyParts)
-        local createdTransparencyChunk, transparencyError = assetBridgeGifCreatePNGChunk("tRNS", transparencyData, nil)
-        if not createdTransparencyChunk then
-            return nil, transparencyError
-        end
-        transparencyChunk = createdTransparencyChunk
-    end
-
-    local rawScanlines = table.create(frameHeight)
-    local nextYieldRow = yieldEveryRows and yieldEveryRows > 0 and yieldEveryRows or nil
-    for frameY = 1, frameHeight do
-        local sourceRowStart
-        if sourceRowOffsets then
-            sourceRowStart = sourceRowOffsets[frameY]
-            if not sourceRowStart then
-                return nil, "GIF interlace row mapping is incomplete."
-            end
-        else
-            sourceRowStart = (frameY - 1) * frameWidth + 1
-        end
-
-        local sourceRowEnd = sourceRowStart + frameWidth - 1
-        rawScanlines[frameY] = "\0" .. string.sub(decodedFramePixels, sourceRowStart, sourceRowEnd)
-        if nextYieldRow and frameY >= nextYieldRow then
-            task.wait()
-            nextYieldRow = nextYieldRow + yieldEveryRows
-        end
-    end
-
-    local rawImageBytes = table.concat(rawScanlines)
-    local yieldEveryBytes = yieldEveryRows and yieldEveryRows > 0 and math.max(4096, yieldEveryRows * frameWidth) or nil
-    local compressedImageBytes = assetBridgeGifEncodeZlib(rawImageBytes, yieldEveryBytes, useFastCompression)
-    local pngHeaderData = assetBridgeGifPackUInt32BE(frameWidth)
-        .. assetBridgeGifPackUInt32BE(frameHeight)
-        .. string.char(8, 3, 0, 0, 0)
-
-    local headerChunk, headerError = assetBridgeGifCreatePNGChunk("IHDR", pngHeaderData, nil)
-    if not headerChunk then
-        return nil, headerError
-    end
-    local paletteChunk, paletteError = assetBridgeGifCreatePNGChunk("PLTE", table.concat(paletteParts), nil)
-    if not paletteChunk then
-        return nil, paletteError
-    end
-    local imageChunk, imageError = assetBridgeGifCreatePNGChunk("IDAT", compressedImageBytes, yieldEveryBytes)
-    if not imageChunk then
-        return nil, imageError
-    end
-    local endChunk, endError = assetBridgeGifCreatePNGChunk("IEND", "", nil)
-    if not endChunk then
-        return nil, endError
-    end
-
-    return "\137PNG\r\n\26\n" .. headerChunk .. paletteChunk .. transparencyChunk .. imageChunk .. endChunk, "indexed"
-end
-
-local function assetBridgeGifBuildPatchFrame(gifDecoder, frameIndex)
+local function assetBridgeGifIncrementalDecodeFrame(gifDecoder, preparedFramePixels)
     if gifDecoder._destroyed then
         return nil, "This GIF decoder has been destroyed."
     end
 
-    local frameMetadata = gifDecoder.Frames[frameIndex]
-    if not frameMetadata then
-        return nil, "GIF frame " .. tostring(frameIndex) .. " does not exist."
+    local nextFrameIndex = gifDecoder.DecodedFrameCount + 1
+    if nextFrameIndex > gifDecoder.FrameCount then
+        return nil, "All GIF frames have already been decoded."
     end
 
-    local decodeStartedAt = os.clock()
-    local animationHash = assetBridgeHashString(gifDecoder.Url)
-    local frameFilePath = assetBridgeCacheDirectories.GIF .. "/" .. animationHash .. "_Patch_v3_" .. string.format("%04d", frameIndex) .. ".png"
-    local useExistingFile = not gifDecoder._refresh and assetBridgeFileExists(frameFilePath)
-    local frameOutputSize = 0
-    local outputMode = "cached"
-    local lzwDecodeTime = 0
-    local pngEncodeTime = 0
-    local fileWriteTime = 0
+    local frameMetadata = gifDecoder.Frames[nextFrameIndex]
+    local canvasRows = gifDecoder._canvasRows
 
-    if not useExistingFile then
-        local lzwDecodeStartedAt = os.clock()
-        local decodedFramePixels, frameDecodeError = assetBridgeGifDecodeLZW(
+    if gifDecoder._previousGraphicFrame then
+        local previousFrame = gifDecoder._previousGraphicFrame
+        if previousFrame.Disposal == 2 then
+            local disposalPixel = previousFrame.Transparent and gifDecoder._transparentPixel or gifDecoder._backgroundPixel
+            assetBridgeGifFillCanvasRect(
+                canvasRows,
+                gifDecoder.Width,
+                gifDecoder.Height,
+                previousFrame.X,
+                previousFrame.Y,
+                previousFrame.Width,
+                previousFrame.Height,
+                disposalPixel
+            )
+        elseif previousFrame.Disposal == 3 then
+            canvasRows = previousFrame.Restore
+            gifDecoder._canvasRows = canvasRows
+        end
+        gifDecoder._previousGraphicFrame = nil
+    end
+
+    local framePixelCount = frameMetadata.Width * frameMetadata.Height
+    local decodeStartedAt = os.clock()
+    local decodedFramePixels = preparedFramePixels
+    if not decodedFramePixels then
+        local frameDecodeError
+        decodedFramePixels, frameDecodeError = assetBridgeGifDecodeLZW(
             frameMetadata.CompressedData,
             frameMetadata.LzwMinimumCodeSize,
-            frameMetadata.Width * frameMetadata.Height,
+            framePixelCount,
             gifDecoder._yieldEveryCodes
         )
         if not decodedFramePixels then
             return nil, frameDecodeError
         end
-        lzwDecodeTime = os.clock() - lzwDecodeStartedAt
+    end
 
-        local frameSourceRowOffsets = nil
-        if frameMetadata.Interlaced then
-            frameSourceRowOffsets = table.create(frameMetadata.Height)
-            local frameSourceRow = 0
-            local interlacePasses = {
-                {Start = 0, Step = 8},
-                {Start = 4, Step = 8},
-                {Start = 2, Step = 4},
-                {Start = 1, Step = 2}
-            }
-            for _, interlacePass in ipairs(interlacePasses) do
-                local destinationY = interlacePass.Start
-                while destinationY < frameMetadata.Height do
-                    frameSourceRowOffsets[destinationY + 1] = frameSourceRow * frameMetadata.Width + 1
-                    frameSourceRow = frameSourceRow + 1
-                    destinationY = destinationY + interlacePass.Step
+    local restoreCanvas = assetBridgeGifCloneCanvas(canvasRows, gifDecoder.Height)
+    local reorderedFramePixels = {}
+    local frameSourceIndex = 0
+
+    if frameMetadata.Interlaced then
+        local interlacePasses = {
+            {Start = 0, Step = 8},
+            {Start = 4, Step = 8},
+            {Start = 2, Step = 4},
+            {Start = 1, Step = 2}
+        }
+
+        for _, interlacePass in ipairs(interlacePasses) do
+            local destinationY = interlacePass.Start
+            while destinationY < frameMetadata.Height do
+                local destinationRow = {}
+                for frameXPosition = 1, frameMetadata.Width do
+                    frameSourceIndex = frameSourceIndex + 1
+                    destinationRow[frameXPosition] = string.byte(decodedFramePixels, frameSourceIndex)
+                end
+                reorderedFramePixels[destinationY + 1] = destinationRow
+                destinationY = destinationY + interlacePass.Step
+            end
+        end
+    else
+        for destinationY = 1, frameMetadata.Height do
+            local destinationRow = {}
+            for frameXPosition = 1, frameMetadata.Width do
+                frameSourceIndex = frameSourceIndex + 1
+                destinationRow[frameXPosition] = string.byte(decodedFramePixels, frameSourceIndex)
+            end
+            reorderedFramePixels[destinationY] = destinationRow
+            if gifDecoder._yieldEveryRows > 0 and destinationY % gifDecoder._yieldEveryRows == 0 then
+                task.wait()
+            end
+        end
+    end
+
+    local frameStartY = math.max(0, frameMetadata.Y)
+    local frameEndY = math.min(gifDecoder.Height, frameMetadata.Y + frameMetadata.Height)
+    local frameStartX = math.max(0, frameMetadata.X)
+    local frameEndX = math.min(gifDecoder.Width, frameMetadata.X + frameMetadata.Width)
+
+    for canvasY = frameStartY, frameEndY - 1 do
+        local destinationCanvasRow = {}
+        local previousCanvasRow = canvasRows[canvasY + 1]
+        for canvasX = 1, gifDecoder.Width do
+            destinationCanvasRow[canvasX] = previousCanvasRow[canvasX]
+        end
+
+        local sourceFrameRow = reorderedFramePixels[canvasY - frameMetadata.Y + 1]
+        if sourceFrameRow then
+            for canvasX = frameStartX, frameEndX - 1 do
+                local colorIndex = sourceFrameRow[canvasX - frameMetadata.X + 1]
+                if colorIndex ~= nil and colorIndex ~= frameMetadata.TransparentIndex then
+                    local pixelBytes = frameMetadata.ColorTable[colorIndex]
+                    if not pixelBytes then
+                        return nil, "GIF frame references a color that is missing from its palette."
+                    end
+                    destinationCanvasRow[canvasX + 1] = pixelBytes
                 end
             end
         end
 
-        if gifDecoder._destroyed or gifDecoder._sessionGeneration ~= assetBridgeSessionGeneration then
-            return nil, "AssetBridge was closed while GIF frames were being built."
+        canvasRows[canvasY + 1] = destinationCanvasRow
+        if gifDecoder._yieldEveryRows > 0 and (canvasY - frameStartY + 1) % gifDecoder._yieldEveryRows == 0 then
+            task.wait()
         end
+    end
 
-        local pngEncodeStartedAt = os.clock()
-        local pngFrameBytes, pngFrameModeOrError = assetBridgeGifEncodeIndexedFramePNG(
-            frameMetadata,
-            decodedFramePixels,
-            frameSourceRowOffsets,
-            gifDecoder._yieldEveryRows,
-            gifDecoder._fastCompression
-        )
-        if not pngFrameBytes then
-            return nil, pngFrameModeOrError
-        end
-        pngEncodeTime = os.clock() - pngEncodeStartedAt
+    local pngFrameBytes, pngFrameError = assetBridgeGifEncodePNG(
+        gifDecoder.Width,
+        gifDecoder.Height,
+        canvasRows,
+        gifDecoder._yieldEveryRows
+    )
+    if not pngFrameBytes then
+        return nil, pngFrameError
+    end
 
-        if gifDecoder._destroyed or gifDecoder._sessionGeneration ~= assetBridgeSessionGeneration then
-            return nil, "AssetBridge was closed while GIF frames were being built."
-        end
+    gifDecoder.TotalOutputBytes = gifDecoder.TotalOutputBytes + #pngFrameBytes
+    if gifDecoder.TotalOutputBytes > gifDecoder._maximumOutputBytes then
+        return nil, "Decoded GIF frames exceed the configured GIFMaxOutputBytes limit."
+    end
 
-        local gifFolderSuccess, gifFolderError = assetBridgeEnsureFolder(assetBridgeCacheDirectories.GIF)
-        if not gifFolderSuccess then
-            return nil, gifFolderError
-        end
+    local animationHash = assetBridgeHashString(gifDecoder.Url)
+    local frameFilePath = "AssetBridge_GIF_" .. animationHash .. "_Frame_" .. string.format("%04d", nextFrameIndex) .. ".png"
+    local useExistingFile = not gifDecoder._refresh and assetBridgeFileExists(frameFilePath)
+
+    if not useExistingFile then
         if type(assetBridgeWriteFileFunction) ~= "function" then
             return nil, "GIF frame generation requires executor writefile()."
         end
-
-        local fileWriteStartedAt = os.clock()
         local writeSuccess, writeError = pcall(assetBridgeWriteFileFunction, frameFilePath, pngFrameBytes)
-        fileWriteTime = os.clock() - fileWriteStartedAt
         if not writeSuccess then
-            return nil, "Could not write decoded GIF frame " .. tostring(frameIndex) .. ": " .. tostring(writeError)
+            return nil, "Could not write decoded GIF frame " .. tostring(nextFrameIndex) .. ": " .. tostring(writeError)
         end
-
-        frameOutputSize = #pngFrameBytes
-        outputMode = pngFrameModeOrError or "indexed"
-        gifDecoder.TotalOutputBytes = gifDecoder.TotalOutputBytes + frameOutputSize
-        if outputMode == "indexed" then
-            gifDecoder.Stats.IndexedFrames = gifDecoder.Stats.IndexedFrames + 1
-        else
-            gifDecoder.Stats.RgbaFrames = gifDecoder.Stats.RgbaFrames + 1
-        end
-        gifDecoder.Stats.TotalLzwDecodeTime = (gifDecoder.Stats.TotalLzwDecodeTime or 0) + lzwDecodeTime
-        gifDecoder.Stats.TotalPngEncodeTime = (gifDecoder.Stats.TotalPngEncodeTime or 0) + pngEncodeTime
-        gifDecoder.Stats.TotalFileWriteTime = (gifDecoder.Stats.TotalFileWriteTime or 0) + fileWriteTime
-    else
-        gifDecoder.Stats.CachedFrames = (gifDecoder.Stats.CachedFrames or 0) + 1
     end
 
-    if gifDecoder._destroyed or gifDecoder._sessionGeneration ~= assetBridgeSessionGeneration then
-        return nil, "AssetBridge was closed while GIF frames were being built."
+    local frameImageId, frameAssetError = assetBridgeGetCustomAssetId(frameFilePath)
+    if not frameImageId then
+        return nil, "Could not create local asset for GIF frame " .. tostring(nextFrameIndex) .. ": " .. tostring(frameAssetError)
     end
 
-    gifDecoder.Stats.TotalPatchPixels = (gifDecoder.Stats.TotalPatchPixels or 0) + frameMetadata.Width * frameMetadata.Height
-    assetBridgeTrackedFiles[frameFilePath] = true
     local frameResult = {
-        Index = frameIndex,
+        Index = nextFrameIndex,
+        ImageId = frameImageId,
         FilePath = frameFilePath,
-        FileReady = true,
         Duration = frameMetadata.Duration,
-        Size = frameOutputSize,
-        OutputMode = outputMode,
+        Size = #pngFrameBytes,
         CompressedSize = frameMetadata.CompressedSize,
         DecodeTime = os.clock() - decodeStartedAt,
-        LzwDecodeTime = lzwDecodeTime,
-        PngEncodeTime = pngEncodeTime,
-        FileWriteTime = fileWriteTime,
         X = frameMetadata.X,
         Y = frameMetadata.Y,
-        Width = frameMetadata.Width,
-        Height = frameMetadata.Height,
-        CanvasWidth = gifDecoder.Width,
-        CanvasHeight = gifDecoder.Height,
+        Width = gifDecoder.Width,
+        Height = gifDecoder.Height,
         SourceWidth = frameMetadata.Width,
         SourceHeight = frameMetadata.Height,
         Disposal = frameMetadata.Disposal,
         Transparent = frameMetadata.Transparent,
-        TransparentIndex = frameMetadata.TransparentIndex,
         Interlaced = frameMetadata.Interlaced
     }
 
-    gifDecoder.DecodedFrames[frameIndex] = frameResult
-    while gifDecoder.DecodedFrames[gifDecoder.DecodedFrameCount + 1] do
-        gifDecoder.DecodedFrameCount = gifDecoder.DecodedFrameCount + 1
-    end
-    gifDecoder.CurrentFrame = math.max(gifDecoder.CurrentFrame, frameIndex)
+    gifDecoder.DecodedFrames[nextFrameIndex] = frameResult
+    gifDecoder.DecodedFrameCount = nextFrameIndex
+    gifDecoder.CurrentFrame = nextFrameIndex
+    gifDecoder._previousGraphicFrame = {
+        Disposal = frameMetadata.Disposal,
+        X = frameMetadata.X,
+        Y = frameMetadata.Y,
+        Width = frameMetadata.Width,
+        Height = frameMetadata.Height,
+        Transparent = frameMetadata.Transparent,
+        Restore = restoreCanvas
+    }
+
     return frameResult
 end
 
-local function assetBridgeGifIncrementalDecodeFrame(gifDecoder)
-    local nextFrameIndex = gifDecoder.DecodedFrameCount + 1
-    if nextFrameIndex > gifDecoder.FrameCount then
-        return nil, "All GIF frames have already been decoded."
-    end
-    return assetBridgeGifBuildPatchFrame(gifDecoder, nextFrameIndex)
-end
-
 function assetBridgeGifDecoderMethods:DecodeNextFrame()
-    local decodedFrame, decodeError = assetBridgeGifIncrementalDecodeFrame(self)
-    if decodedFrame then
-        local frameMetadata = self.Frames[decodedFrame.Index]
-        if frameMetadata then
-            frameMetadata.CompressedData = nil
-            frameMetadata.ColorTable = nil
-        end
-        self._hasReleasedCompressedFrames = true
-    end
-    return decodedFrame, decodeError
+    return assetBridgeGifIncrementalDecodeFrame(self)
 end
 
 function assetBridgeGifDecoderMethods:DecodeNextFramesParallel(frameCount, onFrameDecoded, onDecodeProgress)
@@ -2287,105 +1648,84 @@ function assetBridgeGifDecoderMethods:DecodeNextFramesParallel(frameCount, onFra
 
     frameCount = math.max(1, math.floor(tonumber(frameCount) or 1))
     local firstFrameIndex = self.DecodedFrameCount + 1
-    local totalFrameCount = math.min(frameCount, self.FrameCount - self.DecodedFrameCount)
-    if totalFrameCount <= 0 then
+    local batchCount = math.min(frameCount, self.FrameCount - self.DecodedFrameCount)
+    if batchCount <= 0 then
         return nil, "All GIF frames have already been decoded."
     end
 
-    local lastFrameIndex = firstFrameIndex + totalFrameCount - 1
-    local maximumParallelWorkers = math.max(1, math.min(totalFrameCount, math.floor(tonumber(self._parallelWorkers) or 4)))
-    local nextFrameToBuild = firstFrameIndex
-    local completedFrameCount = 0
-    local finishedWorkerCount = 0
-    local stopWorkers = false
-    local firstBuildFailure = nil
+    local preparedFrames = {}
+    local completedWorkers = 0
 
-    local function runGifFrameWorker()
-        task.wait()
-        while not stopWorkers and not self._destroyed do
-            local assignedFrameIndex = nextFrameToBuild
-            if assignedFrameIndex > lastFrameIndex then
-                break
-            end
-            nextFrameToBuild = assignedFrameIndex + 1
-
-            local frameBuildStartedAt = os.clock()
-            local buildCallSuccess, builtFrame, buildError = pcall(
-                assetBridgeGifBuildPatchFrame,
-                self,
-                assignedFrameIndex
-            )
-            if not buildCallSuccess then
-                buildError = builtFrame
-                builtFrame = nil
-            end
-
-            if self._destroyed or self._sessionGeneration ~= assetBridgeSessionGeneration then
-                stopWorkers = true
-                break
-            end
-
-            if builtFrame then
-                builtFrame.WorkerTime = os.clock() - frameBuildStartedAt
-            elseif not firstBuildFailure then
-                firstBuildFailure = string.format(
-                    "Frame %d failed during LZW decoding or PNG generation: %s",
-                    assignedFrameIndex,
-                    tostring(buildError or "Unknown decoder error")
-                )
-            end
-
-            completedFrameCount = completedFrameCount + 1
-            if type(onDecodeProgress) == "function" then
-                pcall(onDecodeProgress, completedFrameCount, totalFrameCount, assignedFrameIndex, builtFrame ~= nil, buildError)
-            end
-            if builtFrame and type(onFrameDecoded) == "function" then
-                pcall(onFrameDecoded, builtFrame, completedFrameCount, totalFrameCount)
-            end
-
-            if firstBuildFailure then
-                stopWorkers = true
-            end
-        end
-
-        finishedWorkerCount = finishedWorkerCount + 1
-    end
-
-    for workerIndex = 1, maximumParallelWorkers do
-        task.spawn(runGifFrameWorker)
-    end
-
-    while finishedWorkerCount < maximumParallelWorkers do
-        if self._destroyed or self._sessionGeneration ~= assetBridgeSessionGeneration then
-            stopWorkers = true
-        end
-        task.wait()
-    end
-
-    if self._destroyed then
-        return nil, "This GIF decoder was destroyed while frames were being built."
-    end
-    if firstBuildFailure then
-        return nil, firstBuildFailure
-    end
-
-    local decodedFrames = table.create(totalFrameCount)
-    for frameIndex = firstFrameIndex, lastFrameIndex do
-        local decodedFrame = self.DecodedFrames[frameIndex]
-        if not decodedFrame then
-            return nil, "GIF frame " .. tostring(frameIndex) .. " was not generated."
-        end
-        decodedFrames[#decodedFrames + 1] = decodedFrame
-    end
-
-    for frameIndex = firstFrameIndex, lastFrameIndex do
+    for batchOffset = 1, batchCount do
+        local workerOffset = batchOffset
+        local frameIndex = firstFrameIndex + workerOffset - 1
         local frameMetadata = self.Frames[frameIndex]
-        if frameMetadata then
-            frameMetadata.CompressedData = nil
-            frameMetadata.ColorTable = nil
+
+        task.spawn(function()
+            local decodeCallSuccess, decodedPixels, decodeError = pcall(
+                assetBridgeGifDecodeLZW,
+                frameMetadata.CompressedData,
+                frameMetadata.LzwMinimumCodeSize,
+                frameMetadata.Width * frameMetadata.Height,
+                self._yieldEveryCodes
+            )
+
+            if not decodeCallSuccess then
+                decodeError = decodedPixels
+                decodedPixels = nil
+            end
+
+            preparedFrames[workerOffset] = {
+                Pixels = decodedPixels,
+                Error = decodeError,
+                FrameIndex = frameIndex
+            }
+            completedWorkers = completedWorkers + 1
+
+            if type(onDecodeProgress) == "function" then
+                pcall(onDecodeProgress, completedWorkers, batchCount, frameIndex, decodedPixels ~= nil, decodeError)
+            end
+        end)
+    end
+
+    while completedWorkers < batchCount do
+        if self._destroyed then
+            return nil, "This GIF decoder was destroyed while frames were decoding."
+        end
+        task.wait()
+    end
+
+    for batchOffset = 1, batchCount do
+        local preparedFrame = preparedFrames[batchOffset]
+        if not preparedFrame or not preparedFrame.Pixels then
+            return nil, string.format(
+                "Frame %d failed during parallel LZW decoding: %s",
+                firstFrameIndex + batchOffset - 1,
+                tostring(preparedFrame and preparedFrame.Error or "Unknown decoder error")
+            )
         end
     end
-    self._hasReleasedCompressedFrames = true
+
+    local decodedFrames = {}
+    for batchOffset = 1, batchCount do
+        if self._destroyed then
+            return nil, "This GIF decoder was destroyed while frames were being composed."
+        end
+
+        local preparedFramePixels = preparedFrames[batchOffset].Pixels
+        preparedFrames[batchOffset].Pixels = nil
+        local decodedFrame, frameError = assetBridgeGifIncrementalDecodeFrame(self, preparedFramePixels)
+        preparedFramePixels = nil
+        if not decodedFrame then
+            return nil, string.format("Frame %d failed during composition: %s", firstFrameIndex + batchOffset - 1, tostring(frameError))
+        end
+
+        decodedFrames[#decodedFrames + 1] = decodedFrame
+        if type(onFrameDecoded) == "function" then
+            pcall(onFrameDecoded, decodedFrame, batchOffset, batchCount)
+        end
+    end
+
     return decodedFrames
 end
 
@@ -2398,21 +1738,13 @@ function assetBridgeGifDecoderMethods:Reset()
     if self._destroyed then
         return false, "This GIF decoder has been destroyed."
     end
-    if self._hasReleasedCompressedFrames then
-        return false, "This GIF decoder has already released its compressed frame data to save memory. Open the GIF again to rebuild it."
-    end
+    local initialPixel = self._initialTransparent and self._transparentPixel or self._backgroundPixel
+    self._canvasRows = assetBridgeGifCreateCanvas(self.Width, self.Height, initialPixel)
+    self._previousGraphicFrame = nil
     self.DecodedFrames = {}
     self.DecodedFrameCount = 0
     self.CurrentFrame = 0
     self.TotalOutputBytes = 0
-    self.Stats.IndexedFrames = 0
-    self.Stats.RgbaFrames = 0
-    self.Stats.ReusedFrames = 0
-    self.Stats.CachedFrames = 0
-    self.Stats.TotalPatchPixels = 0
-    self.Stats.TotalLzwDecodeTime = 0
-    self.Stats.TotalPngEncodeTime = 0
-    self.Stats.TotalFileWriteTime = 0
     return true
 end
 
@@ -2421,10 +1753,11 @@ function assetBridgeGifDecoderMethods:Destroy()
         return
     end
     self._destroyed = true
+    self._canvasRows = nil
+    self._previousGraphicFrame = nil
     self.DecodedFrames = {}
     self.Frames = {}
     self._gifBytes = nil
-    assetBridgeActiveResources[self] = nil
 end
 
 local assetBridgeGifDecoderMetatable = {
@@ -2441,8 +1774,14 @@ local function assetBridgeCreateIncrementalGifDecoder(gifDownload, gifScanned, g
     if type(assetBridgeWriteFileFunction) ~= "function" then
         return nil, "GIF frame generation requires executor writefile()."
     end
+    if type(assetBridgeGetCustomAssetFunction) ~= "function" then
+        return nil, "GIF rendering requires getcustomasset() or getsynasset()."
+    end
+
     local transparentPixel = string.char(0, 0, 0, 0)
     local backgroundPixel = gifScanned.BackgroundPixel or transparentPixel
+    local initialPixel = gifScanned.InitialTransparent and transparentPixel or backgroundPixel
+
     local decoder = setmetatable({
         Url = gifDownload.Url,
         Width = gifScanned.Width,
@@ -2456,27 +1795,17 @@ local function assetBridgeCreateIncrementalGifDecoder(gifDownload, gifScanned, g
         LoopCount = gifScanned.LoopCount,
         TotalPixels = gifScanned.TotalPixels,
         TotalOutputBytes = 0,
-        Stats = {
-            IndexedFrames = 0,
-            RgbaFrames = 0,
-            ReusedFrames = 0,
-            CachedFrames = 0,
-            TotalPatchPixels = 0,
-            TotalLzwDecodeTime = 0,
-            TotalPngEncodeTime = 0,
-            TotalFileWriteTime = 0
-        },
         Format = "gif",
         Cached = gifDownload.Cached,
+        _canvasRows = assetBridgeGifCreateCanvas(gifScanned.Width, gifScanned.Height, initialPixel),
         _backgroundPixel = backgroundPixel,
         _transparentPixel = transparentPixel,
         _initialTransparent = gifScanned.InitialTransparent,
+        _previousGraphicFrame = nil,
+        _maximumOutputBytes = tonumber(gifOptions.MaxOutputBytes) or tonumber(AssetBridge.Config.GIFMaxOutputBytes) or 40000000,
         _yieldEveryRows = math.max(0, math.floor(tonumber(gifOptions.YieldEveryRows) or 24)),
         _yieldEveryCodes = math.max(0, math.floor(tonumber(gifOptions.YieldEveryCodes) or 8192)),
-        _parallelWorkers = math.clamp(math.floor(tonumber(gifOptions.ParallelWorkers) or 4), 1, 8),
-        _fastCompression = gifOptions.FastCompression ~= false,
-        _refresh = gifOptions.Refresh == true or gifOptions.RefreshFrames == true,
-        _sessionGeneration = assetBridgeSessionGeneration,
+        _refresh = gifOptions.Refresh == true,
         _destroyed = false,
     }, assetBridgeGifDecoderMetatable)
 
@@ -2488,437 +1817,18 @@ local function assetBridgeCreateIncrementalGifDecoder(gifDownload, gifScanned, g
     end
     decoder.Duration = totalDuration
     decoder.CompressedSize = totalCompressedBytes
-    assetBridgeActiveResources[decoder] = true
 
     return decoder
 end
 
-local assetBridgeGifEnsureFrameBuilt
 local assetBridgeGifPlayerMethods = {}
-
-local function assetBridgeGifPreloadFrame(gifAnimation, gifFrameIndex)
-    if gifAnimation._destroyed then
-        return
-    end
-    if gifAnimation._preloading then
-        gifAnimation._preloadRequestedFrame = gifFrameIndex
-        return
-    end
-
-    local gifFrameData = gifAnimation.Frames[gifFrameIndex]
-    if not gifFrameData or rawget(gifFrameData, "ImageId") or rawget(gifFrameData, "_AssetLoading") then
-        return
-    end
-
-    local preloadEndFrame = math.min(
-        gifAnimation.FrameCount,
-        gifFrameIndex + math.max(1, gifAnimation._preloadFrameCount or 2) - 1
-    )
-    for preloadFrameIndex = gifFrameIndex, preloadEndFrame do
-        local preloadFrameData = gifAnimation.Frames[preloadFrameIndex]
-        if preloadFrameData and not rawget(preloadFrameData, "ImageId") then
-            rawset(preloadFrameData, "_AssetLoading", true)
-        end
-    end
-
-    gifAnimation._preloading = true
-    task.spawn(function()
-        local buildSuccess, buildError = assetBridgeGifEnsureFrameBuilt(gifAnimation, preloadEndFrame)
-        if buildSuccess and not gifAnimation._destroyed then
-            for preloadFrameIndex = gifFrameIndex, preloadEndFrame do
-                local preloadFrameData = gifAnimation.Frames[preloadFrameIndex]
-                if preloadFrameData and not rawget(preloadFrameData, "ImageId") then
-                    local preloadImageId, preloadAssetError = assetBridgeGetCustomAssetId(preloadFrameData.FilePath)
-                    if preloadImageId then
-                        rawset(preloadFrameData, "ImageId", preloadImageId)
-                    else
-                        rawset(preloadFrameData, "AssetError", preloadAssetError)
-                    end
-                end
-                if preloadFrameData then
-                    rawset(preloadFrameData, "_AssetLoading", nil)
-                end
-            end
-        elseif not gifAnimation._destroyed then
-            for preloadFrameIndex = gifFrameIndex, preloadEndFrame do
-                local preloadFrameData = gifAnimation.Frames[preloadFrameIndex]
-                if preloadFrameData then
-                    rawset(preloadFrameData, "AssetError", buildError)
-                    rawset(preloadFrameData, "_AssetLoading", nil)
-                end
-            end
-        end
-
-        gifAnimation._preloading = false
-        local requestedPreloadFrame = gifAnimation._preloadRequestedFrame
-        gifAnimation._preloadRequestedFrame = nil
-        if requestedPreloadFrame and requestedPreloadFrame <= gifAnimation.FrameCount and not gifAnimation._destroyed then
-            assetBridgeGifPreloadFrame(gifAnimation, requestedPreloadFrame)
-        end
-    end)
-end
-
-local function assetBridgeGifCreateLayerPiece(gifPlayer, gifLayer, gifPiece)
-    local gifTarget = gifPlayer._target
-    if not gifTarget or not gifTarget.Parent then
-        return nil, "The GIF player's target is no longer parented."
-    end
-
-    local gifCanvasWidth = math.max(1, gifPlayer._animation.Width)
-    local gifCanvasHeight = math.max(1, gifPlayer._animation.Height)
-    local gifPieceInstance = assetBridgeInstanceNew(gifLayer.Kind == "image" and "ImageLabel" or "Frame")
-    gifPieceInstance.Name = "AssetBridgeGifPatch"
-    gifPieceInstance.AnchorPoint = Vector2.zero
-    gifPieceInstance.Position = UDim2.fromScale(gifPiece.X / gifCanvasWidth, gifPiece.Y / gifCanvasHeight)
-    gifPieceInstance.Size = UDim2.fromScale(gifPiece.Width / gifCanvasWidth, gifPiece.Height / gifCanvasHeight)
-    gifPieceInstance.BorderSizePixel = 0
-    gifPieceInstance.ZIndex = gifLayer.Container.ZIndex + 1
-
-    if gifLayer.Kind == "image" then
-        gifPieceInstance.BackgroundTransparency = 1
-        gifPieceInstance.Image = gifLayer.ImageId
-        gifPieceInstance.ImageColor3 = Color3.new(1, 1, 1)
-        gifPieceInstance.ImageTransparency = 0
-        gifPieceInstance.ScaleType = Enum.ScaleType.Stretch
-        gifPieceInstance.ImageRectOffset = Vector2.new(gifPiece.SourceX or 0, gifPiece.SourceY or 0)
-        gifPieceInstance.ImageRectSize = Vector2.new(gifPiece.Width, gifPiece.Height)
-    else
-        gifPieceInstance.BackgroundColor3 = gifLayer.BackgroundColor
-        gifPieceInstance.BackgroundTransparency = gifLayer.BackgroundTransparency
-    end
-
-    gifPieceInstance.Parent = gifLayer.Container
-    return gifPieceInstance
-end
-
-local function assetBridgeGifRebuildPlayerLayer(gifPlayer, gifLayer)
-    if not gifLayer.Container or not gifLayer.Container.Parent then
-        return false, "The GIF layer container no longer exists."
-    end
-
-    for _, gifChild in ipairs(gifLayer.Container:GetChildren()) do
-        gifChild:Destroy()
-    end
-
-    for _, gifPiece in ipairs(gifLayer.Pieces) do
-        local pieceSuccess, pieceResult = pcall(assetBridgeGifCreateLayerPiece, gifPlayer, gifLayer, gifPiece)
-        if not pieceSuccess then
-            return false, tostring(pieceResult)
-        end
-        if not pieceResult then
-            return false, "Could not create a GIF image layer piece."
-        end
-    end
-    return true
-end
-
-local function assetBridgeGifAddPlayerLayer(gifPlayer, layerKind, pieces, layerProperties)
-    local gifTarget = gifPlayer._target
-    if not gifTarget or not gifTarget.Parent then
-        return nil, "The GIF player's target is no longer parented."
-    end
-
-    local gifLayerContainer = assetBridgeInstanceNew("Frame")
-    gifLayerContainer.Name = "AssetBridgeGifLayer"
-    gifLayerContainer.AnchorPoint = Vector2.zero
-    local viewportWidthScale = 1
-    local viewportHeightScale = 1
-    local viewportXScale = 0
-    local viewportYScale = 0
-    if gifTarget.ScaleType == Enum.ScaleType.Fit then
-        local targetAbsoluteSize = gifTarget.AbsoluteSize
-        if targetAbsoluteSize.X > 0 and targetAbsoluteSize.Y > 0 then
-            local targetAspectRatio = targetAbsoluteSize.X / targetAbsoluteSize.Y
-            local animationAspectRatio = gifPlayer._animation.Width / gifPlayer._animation.Height
-            if targetAspectRatio > animationAspectRatio then
-                viewportWidthScale = animationAspectRatio / targetAspectRatio
-                viewportXScale = (1 - viewportWidthScale) / 2
-            else
-                viewportHeightScale = targetAspectRatio / animationAspectRatio
-                viewportYScale = (1 - viewportHeightScale) / 2
-            end
-        end
-    end
-    gifLayerContainer.Position = UDim2.fromScale(viewportXScale, viewportYScale)
-    gifLayerContainer.Size = UDim2.fromScale(viewportWidthScale, viewportHeightScale)
-    gifLayerContainer.BackgroundTransparency = 1
-    gifLayerContainer.BorderSizePixel = 0
-    gifLayerContainer.ClipsDescendants = true
-    local gifLayerZIndex = gifPlayer._nextLayerZIndex or (gifTarget.ZIndex + 1)
-    gifPlayer._nextLayerZIndex = gifLayerZIndex + 2
-    gifLayerContainer.ZIndex = gifLayerZIndex
-    gifLayerContainer.Parent = gifTarget
-
-    local gifLayer = {
-        Kind = layerKind,
-        Container = gifLayerContainer,
-        Pieces = pieces,
-        ImageId = layerProperties and layerProperties.ImageId,
-        BackgroundColor = layerProperties and layerProperties.BackgroundColor,
-        BackgroundTransparency = layerProperties and layerProperties.BackgroundTransparency or 0
-    }
-    table.insert(gifPlayer._layers, gifLayer)
-
-    local layerBuildSuccess, layerBuildError = assetBridgeGifRebuildPlayerLayer(gifPlayer, gifLayer)
-    if not layerBuildSuccess then
-        gifLayerContainer:Destroy()
-        table.remove(gifPlayer._layers, #gifPlayer._layers)
-        return nil, layerBuildError
-    end
-    return gifLayer
-end
-
-local function assetBridgeGifRemovePlayerLayer(gifPlayer, gifLayer)
-    if not gifLayer then
-        return
-    end
-    if gifLayer.Container then
-        pcall(function()
-            gifLayer.Container:Destroy()
-        end)
-        gifLayer.Container = nil
-    end
-    for layerIndex = #gifPlayer._layers, 1, -1 do
-        if gifPlayer._layers[layerIndex] == gifLayer then
-            table.remove(gifPlayer._layers, layerIndex)
-            break
-        end
-    end
-end
-
-local function assetBridgeGifSplitPieceAroundClearRect(gifPiece, clearX, clearY, clearWidth, clearHeight)
-    local pieceLeft = gifPiece.X
-    local pieceTop = gifPiece.Y
-    local pieceRight = pieceLeft + gifPiece.Width
-    local pieceBottom = pieceTop + gifPiece.Height
-    local clearLeft = clearX
-    local clearTop = clearY
-    local clearRight = clearX + clearWidth
-    local clearBottom = clearY + clearHeight
-
-    local intersectionLeft = math.max(pieceLeft, clearLeft)
-    local intersectionTop = math.max(pieceTop, clearTop)
-    local intersectionRight = math.min(pieceRight, clearRight)
-    local intersectionBottom = math.min(pieceBottom, clearBottom)
-
-    if intersectionLeft >= intersectionRight or intersectionTop >= intersectionBottom then
-        return {gifPiece}
-    end
-
-    local retainedPieces = {}
-    local function appendPiece(pieceX, pieceY, pieceWidth, pieceHeight)
-        if pieceWidth <= 0 or pieceHeight <= 0 then
-            return
-        end
-        retainedPieces[#retainedPieces + 1] = {
-            X = pieceX,
-            Y = pieceY,
-            Width = pieceWidth,
-            Height = pieceHeight,
-            SourceX = (gifPiece.SourceX or 0) + pieceX - pieceLeft,
-            SourceY = (gifPiece.SourceY or 0) + pieceY - pieceTop
-        }
-    end
-
-    appendPiece(pieceLeft, pieceTop, gifPiece.Width, intersectionTop - pieceTop)
-    appendPiece(pieceLeft, intersectionBottom, gifPiece.Width, pieceBottom - intersectionBottom)
-    appendPiece(pieceLeft, intersectionTop, intersectionLeft - pieceLeft, intersectionBottom - intersectionTop)
-    appendPiece(intersectionRight, intersectionTop, pieceRight - intersectionRight, intersectionBottom - intersectionTop)
-    return retainedPieces
-end
-
-local function assetBridgeGifClipPlayerLayers(gifPlayer, clearX, clearY, clearWidth, clearHeight)
-    for layerIndex = #gifPlayer._layers, 1, -1 do
-        local gifLayer = gifPlayer._layers[layerIndex]
-        local replacementPieces = {}
-        for _, gifPiece in ipairs(gifLayer.Pieces) do
-            local splitPieces = assetBridgeGifSplitPieceAroundClearRect(gifPiece, clearX, clearY, clearWidth, clearHeight)
-            for _, retainedPiece in ipairs(splitPieces) do
-                replacementPieces[#replacementPieces + 1] = retainedPiece
-            end
-        end
-        gifLayer.Pieces = replacementPieces
-
-        if #replacementPieces == 0 then
-            assetBridgeGifRemovePlayerLayer(gifPlayer, gifLayer)
-        else
-            local rebuildSuccess, rebuildError = assetBridgeGifRebuildPlayerLayer(gifPlayer, gifLayer)
-            if not rebuildSuccess then
-                return false, rebuildError
-            end
-        end
-    end
-    return true
-end
-
-local function assetBridgeGifGetBackgroundProperties(gifAnimation)
-    local backgroundPixel = gifAnimation._backgroundPixel or string.char(0, 0, 0, 0)
-    local red = string.byte(backgroundPixel, 1) or 0
-    local green = string.byte(backgroundPixel, 2) or 0
-    local blue = string.byte(backgroundPixel, 3) or 0
-    local alpha = string.byte(backgroundPixel, 4) or 255
-    local backgroundTransparency = gifAnimation._initialTransparent and 1 or (1 - alpha / 255)
-    return Color3.fromRGB(red, green, blue), backgroundTransparency
-end
-
-local function assetBridgeGifResetPlayerLayers(gifPlayer)
-    for layerIndex = #gifPlayer._layers, 1, -1 do
-        assetBridgeGifRemovePlayerLayer(gifPlayer, gifPlayer._layers[layerIndex])
-    end
-    gifPlayer._previousFrame = nil
-    gifPlayer._displayedThrough = 0
-    gifPlayer._nextLayerZIndex = gifPlayer._target.ZIndex + 1
-
-    if not gifPlayer._animation._initialTransparent then
-        local backgroundColor, backgroundTransparency = assetBridgeGifGetBackgroundProperties(gifPlayer._animation)
-        if backgroundTransparency < 1 then
-            local backgroundLayer, backgroundError = assetBridgeGifAddPlayerLayer(
-                gifPlayer,
-                "background",
-                {{X = 0, Y = 0, Width = gifPlayer._animation.Width, Height = gifPlayer._animation.Height}},
-                {BackgroundColor = backgroundColor, BackgroundTransparency = backgroundTransparency}
-            )
-            if not backgroundLayer then
-                return false, backgroundError
-            end
-        end
-    end
-    return true
-end
-
-local function assetBridgeGifApplyPreviousFrameDisposal(gifPlayer)
-    local previousFrame = gifPlayer._previousFrame
-    if not previousFrame then
-        return true
-    end
-
-    if previousFrame.Disposal == 2 then
-        local clipSuccess, clipError = assetBridgeGifClipPlayerLayers(
-            gifPlayer,
-            previousFrame.X,
-            previousFrame.Y,
-            previousFrame.Width,
-            previousFrame.Height
-        )
-        if not clipSuccess then
-            return false, clipError
-        end
-
-        local backgroundColor, backgroundTransparency = assetBridgeGifGetBackgroundProperties(gifPlayer._animation)
-        if backgroundTransparency < 1 then
-            local backgroundLayer, backgroundError = assetBridgeGifAddPlayerLayer(
-                gifPlayer,
-                "background",
-                {{X = previousFrame.X, Y = previousFrame.Y, Width = previousFrame.Width, Height = previousFrame.Height}},
-                {BackgroundColor = backgroundColor, BackgroundTransparency = backgroundTransparency}
-            )
-            if not backgroundLayer then
-                return false, backgroundError
-            end
-        end
-    elseif previousFrame.Disposal == 3 then
-        assetBridgeGifRemovePlayerLayer(gifPlayer, previousFrame.Layer)
-    end
-
-    gifPlayer._previousFrame = nil
-    return true
-end
-
-local function assetBridgeGifGetPlayerFrameImageId(gifAnimation, gifFrameIndex)
-    local gifFrameData = gifAnimation.Frames[gifFrameIndex]
-    if not gifFrameData then
-        return nil, "GIF frame " .. tostring(gifFrameIndex) .. " does not exist."
-    end
-
-    while rawget(gifFrameData, "_AssetLoading") and not gifAnimation._destroyed do
-        task.wait()
-    end
-    if gifAnimation._destroyed then
-        return nil, "This GIF animation has been destroyed."
-    end
-    if rawget(gifFrameData, "ImageId") then
-        return rawget(gifFrameData, "ImageId")
-    end
-
-    local buildSuccess, buildError = assetBridgeGifEnsureFrameBuilt(gifAnimation, gifFrameIndex)
-    if not buildSuccess then
-        return nil, buildError
-    end
-
-    local gifFrameImageId, gifFrameAssetError = assetBridgeGetCustomAssetId(gifFrameData.FilePath)
-    if not gifFrameImageId then
-        rawset(gifFrameData, "AssetError", gifFrameAssetError)
-        return nil, gifFrameAssetError
-    end
-    rawset(gifFrameData, "ImageId", gifFrameImageId)
-    return gifFrameImageId
-end
 
 local function assetBridgeGifSetPlayerFrame(gifPlayer, gifFrameIndex)
     local gifAnimation = gifPlayer._animation
-    if gifAnimation._destroyed then
-        return false, "This GIF animation has been destroyed."
-    end
+    local gifTarget = gifPlayer._target
 
     gifFrameIndex = math.floor(tonumber(gifFrameIndex) or 1)
     gifFrameIndex = math.clamp(gifFrameIndex, 1, gifAnimation.FrameCount)
-
-    local buildSuccess, buildError = assetBridgeGifEnsureFrameBuilt(gifAnimation, gifFrameIndex)
-    if not buildSuccess then
-        return false, "Could not build GIF frame " .. tostring(gifFrameIndex) .. ": " .. tostring(buildError)
-    end
-
-    if gifFrameIndex <= (gifPlayer._displayedThrough or 0) then
-        local resetSuccess, resetError = assetBridgeGifResetPlayerLayers(gifPlayer)
-        if not resetSuccess then
-            return false, resetError
-        end
-    elseif gifPlayer._displayedThrough == nil then
-        local resetSuccess, resetError = assetBridgeGifResetPlayerLayers(gifPlayer)
-        if not resetSuccess then
-            return false, resetError
-        end
-    end
-
-    for currentFrameIndex = (gifPlayer._displayedThrough or 0) + 1, gifFrameIndex do
-        local currentFrameData = gifAnimation.Frames[currentFrameIndex]
-        local frameImageId, frameAssetError = assetBridgeGifGetPlayerFrameImageId(gifAnimation, currentFrameIndex)
-        if not frameImageId then
-            return false, "Could not create local asset for GIF frame " .. tostring(currentFrameIndex) .. ": " .. tostring(frameAssetError)
-        end
-
-        local disposalSuccess, disposalError = assetBridgeGifApplyPreviousFrameDisposal(gifPlayer)
-        if not disposalSuccess then
-            return false, disposalError
-        end
-
-        local frameLayer, layerError = assetBridgeGifAddPlayerLayer(
-            gifPlayer,
-            "image",
-            {{
-                X = currentFrameData.X,
-                Y = currentFrameData.Y,
-                Width = currentFrameData.SourceWidth,
-                Height = currentFrameData.SourceHeight,
-                SourceX = 0,
-                SourceY = 0
-            }},
-            {ImageId = frameImageId}
-        )
-        if not frameLayer then
-            return false, layerError
-        end
-
-        gifPlayer._previousFrame = {
-            X = currentFrameData.X,
-            Y = currentFrameData.Y,
-            Width = currentFrameData.SourceWidth,
-            Height = currentFrameData.SourceHeight,
-            Disposal = currentFrameData.Disposal,
-            Layer = frameLayer
-        }
-        gifPlayer._displayedThrough = currentFrameIndex
-    end
 
     gifPlayer.CurrentFrame = gifFrameIndex
     gifPlayer.CurrentTime = 0
@@ -2926,12 +1836,9 @@ local function assetBridgeGifSetPlayerFrame(gifPlayer, gifFrameIndex)
         gifPlayer.CurrentTime = gifPlayer.CurrentTime + gifAnimation.Frames[precedingFrameIndex].Duration
     end
 
-    local nextFrameIndex = gifFrameIndex >= gifAnimation.FrameCount and 1 or gifFrameIndex + 1
-    if gifAnimation.FrameCount > 1 then
-        assetBridgeGifPreloadFrame(gifAnimation, nextFrameIndex)
+    if gifTarget and gifTarget.Parent then
+        gifTarget.Image = gifAnimation.Frames[gifFrameIndex].ImageId
     end
-
-    return true
 end
 
 local function assetBridgeGifRunPlayer(gifPlayer, playbackToken)
@@ -2946,6 +1853,10 @@ local function assetBridgeGifRunPlayer(gifPlayer, playbackToken)
                 local gifCurrentFrameData = gifAnimationData.Frames[gifPlayer.CurrentFrame]
                 local gifRemainingFrameTime = gifCurrentFrameData.Duration
                 local gifFrameStartAnimationTime = gifPlayer.CurrentTime
+
+                if gifPlayer._target and gifPlayer._target.Parent then
+                    gifPlayer._target.Image = gifCurrentFrameData.ImageId
+                end
 
                 while gifRemainingFrameTime > 0 and gifPlayer._token == playbackToken and gifPlayer._state ~= "destroyed" do
                     if gifPlayer._state == "paused" then
@@ -2973,23 +1884,9 @@ local function assetBridgeGifRunPlayer(gifPlayer, playbackToken)
                             break
                         end
 
-                        local resetFrameSuccess, resetFrameError = assetBridgeGifSetPlayerFrame(gifPlayer, 1)
-                        if not resetFrameSuccess then
-                            gifPlayer._state = "error"
-                            gifPlayer._lastError = resetFrameError
-                            gifPlayer.IsPlaying = false
-                            gifPlayer.IsPaused = false
-                            break
-                        end
+                        assetBridgeGifSetPlayerFrame(gifPlayer, 1)
                     else
-                        local nextFrameSuccess, nextFrameError = assetBridgeGifSetPlayerFrame(gifPlayer, gifPlayer.CurrentFrame + 1)
-                        if not nextFrameSuccess then
-                            gifPlayer._state = "error"
-                            gifPlayer._lastError = nextFrameError
-                            gifPlayer.IsPlaying = false
-                            gifPlayer.IsPaused = false
-                            break
-                        end
+                        assetBridgeGifSetPlayerFrame(gifPlayer, gifPlayer.CurrentFrame + 1)
                     end
                 end
             else
@@ -3020,12 +1917,7 @@ function assetBridgeGifPlayerMethods:Play()
     self.IsPaused = false
 
     if previousPlayerState == "ended" or self.CurrentFrame >= self._animation.FrameCount then
-        local resetFrameSuccess, resetFrameError = assetBridgeGifSetPlayerFrame(self, 1)
-        if not resetFrameSuccess then
-            self._state = "stopped"
-            self.IsPlaying = false
-            return false, resetFrameError
-        end
+        assetBridgeGifSetPlayerFrame(self, 1)
     end
 
     assetBridgeGifRunPlayer(self, self._token)
@@ -3071,7 +1963,8 @@ function assetBridgeGifPlayerMethods:Stop()
     self._state = "stopped"
     self.IsPlaying = false
     self.IsPaused = false
-    return assetBridgeGifSetPlayerFrame(self, 1)
+    assetBridgeGifSetPlayerFrame(self, 1)
+    return true
 end
 
 function assetBridgeGifPlayerMethods:SetLooped(shouldLoop)
@@ -3102,15 +1995,7 @@ function assetBridgeGifPlayerMethods:SetFrame(frameIndex)
     local previousPlayerState = self._state
     local wasActive = previousPlayerState == "playing" or previousPlayerState == "paused"
     self._token = self._token + 1
-    local frameSetSuccess, frameSetError = assetBridgeGifSetPlayerFrame(self, frameIndex)
-    if not frameSetSuccess then
-        if wasActive then
-            self._state = "stopped"
-            self.IsPlaying = false
-            self.IsPaused = false
-        end
-        return false, frameSetError
-    end
+    assetBridgeGifSetPlayerFrame(self, frameIndex)
 
     if wasActive then
         self._state = previousPlayerState
@@ -3137,36 +2022,6 @@ function assetBridgeGifPlayerMethods:Destroy()
         self.EndedEvent = nil
         self.Ended = nil
     end
-
-    for layerIndex = #self._layers, 1, -1 do
-        assetBridgeGifRemovePlayerLayer(self, self._layers[layerIndex])
-    end
-
-    local targetObject = self._target
-    local originalProperties = self._originalTargetProperties
-    if targetObject and targetObject.Parent and originalProperties then
-        pcall(function()
-            targetObject.Image = originalProperties.Image
-            targetObject.ImageTransparency = originalProperties.ImageTransparency
-            targetObject.BackgroundColor3 = originalProperties.BackgroundColor3
-            targetObject.BackgroundTransparency = originalProperties.BackgroundTransparency
-        end)
-    end
-
-    local animation = self._animation
-    if animation and animation._players then
-        for playerIndex = #animation._players, 1, -1 do
-            if animation._players[playerIndex] == self then
-                table.remove(animation._players, playerIndex)
-                break
-            end
-        end
-    end
-
-    self._target = nil
-    self._animation = nil
-    self._layers = {}
-    assetBridgeActiveResources[self] = nil
 end
 
 local assetBridgeGifPlayerMetatable = {
@@ -3190,58 +2045,52 @@ local assetBridgeGifPlayerMetatable = {
     end
 }
 
-local assetBridgeGifFrameMetatable = {
-    __index = function(gifFrameData, propertyName)
-        if propertyName == "ImageId" then
-            local animation = rawget(gifFrameData, "_Animation")
-            if animation and assetBridgeGifEnsureFrameBuilt then
-                local buildSuccess, buildError = assetBridgeGifEnsureFrameBuilt(animation, rawget(gifFrameData, "Index"))
-                if not buildSuccess then
-                    rawset(gifFrameData, "AssetError", buildError)
-                    return nil
-                end
-            end
-
-            local gifFrameImageId, gifFrameAssetError = assetBridgeGetCustomAssetId(rawget(gifFrameData, "FilePath"))
-            if gifFrameImageId then
-                rawset(gifFrameData, "ImageId", gifFrameImageId)
-            else
-                rawset(gifFrameData, "AssetError", gifFrameAssetError)
-            end
-            return gifFrameImageId
-        end
-        return nil
-    end
-}
-
 local function assetBridgeCreateGifAnimation(gifDownload, gifDecoded, gifOptions)
-    local gifDecoder = gifDecoded.Decoder
-    if not gifDecoder then
-        return nil, "The GIF animation is missing its incremental decoder."
-    end
+    local gifAnimationHash = assetBridgeHashString(gifDownload.Url)
+    local gifAnimationFrames = {}
+
     if type(assetBridgeWriteFileFunction) ~= "function" then
         return nil, "GIF frame generation requires executor writefile()."
     end
 
-    local gifAnimationFrames = {}
-    local gifAnimationDuration = 0
-    for gifFrameIndex, frameMetadata in ipairs(gifDecoded.Frames) do
-        gifAnimationFrames[gifFrameIndex] = setmetatable({
+    if type(assetBridgeGetCustomAssetFunction) ~= "function" then
+        return nil, "GIF playback requires getcustomasset() or getsynasset()."
+    end
+
+    for gifFrameIndex, decodedFrame in ipairs(gifDecoded.Frames) do
+        local frameFilePath = decodedFrame.FilePath or ("AssetBridge_GIF_" .. gifAnimationHash .. "_Frame_" .. string.format("%04d", gifFrameIndex) .. ".png")
+        local frameImageId = decodedFrame.ImageId
+
+        if not frameImageId then
+            local frameAlreadyCached = assetBridgeFileExists(frameFilePath) and not gifOptions.Refresh
+
+            if not frameAlreadyCached then
+                local frameWriteSuccess, frameWriteError = pcall(assetBridgeWriteFileFunction, frameFilePath, decodedFrame.Bytes)
+                if not frameWriteSuccess then
+                    return nil, "Could not write decoded GIF frame " .. tostring(gifFrameIndex) .. ": " .. tostring(frameWriteError)
+                end
+            end
+
+            local frameAssetError
+            frameImageId, frameAssetError = assetBridgeGetCustomAssetId(frameFilePath)
+            if not frameImageId then
+                return nil, "Could not create local asset for GIF frame " .. tostring(gifFrameIndex) .. ": " .. tostring(frameAssetError)
+            end
+        end
+
+        gifAnimationFrames[gifFrameIndex] = {
             Index = gifFrameIndex,
-            Duration = frameMetadata.Duration,
-            CompressedSize = frameMetadata.CompressedSize or 0,
-            SourceWidth = frameMetadata.Width,
-            SourceHeight = frameMetadata.Height,
-            X = frameMetadata.X,
-            Y = frameMetadata.Y,
-            Disposal = frameMetadata.Disposal,
-            Transparent = frameMetadata.Transparent,
-            TransparentIndex = frameMetadata.TransparentIndex,
-            FilePath = nil,
-            FileReady = false,
-            Size = 0
-        }, assetBridgeGifFrameMetatable)
-        gifAnimationDuration = gifAnimationDuration + frameMetadata.Duration
+            ImageId = frameImageId,
+            FilePath = frameFilePath,
+            Duration = decodedFrame.Duration,
+            Size = decodedFrame.Size or (decodedFrame.Bytes and #decodedFrame.Bytes or 0),
+            CompressedSize = decodedFrame.CompressedSize or 0
+        }
+    end
+
+    local gifAnimationDuration = 0
+    for _, gifFrameData in ipairs(gifAnimationFrames) do
+        gifAnimationDuration = gifAnimationDuration + gifFrameData.Duration
     end
 
     local gifAnimation = {
@@ -3254,74 +2103,23 @@ local function assetBridgeCreateGifAnimation(gifDownload, gifDecoded, gifOptions
         LoopExtensionFound = gifDecoded.LoopExtensionFound,
         LoopCount = gifDecoded.LoopCount,
         TotalPixels = gifDecoded.TotalPixels,
-        TotalOutputBytes = 0,
-        Stats = gifDecoder.Stats,
+        TotalOutputBytes = gifDecoded.TotalOutputBytes,
         Cached = gifDownload.Cached,
-        Format = "gif",
-        _decoder = gifDecoder,
-        _backgroundPixel = gifDecoder._backgroundPixel,
-        _initialTransparent = gifDecoder._initialTransparent,
-        _players = {},
-        _building = false,
-        _buildError = nil,
-        _buildOptions = gifOptions,
-        _preloadFrameCount = math.clamp(math.floor(tonumber(gifOptions.PreloadFrames) or 2), 1, 4),
-        _onFrameDecoded = gifOptions.OnFrameDecoded,
-        _onDecodeProgress = gifOptions.OnDecodeProgress
+        Format = "gif"
     }
 
-    for _, gifFrameData in ipairs(gifAnimationFrames) do
-        rawset(gifFrameData, "_Animation", gifAnimation)
-    end
-
-    function gifAnimation:Destroy()
-        if self._destroyed then
-            return
-        end
-        self._destroyed = true
-
-        for playerIndex = #self._players, 1, -1 do
-            local gifPlayer = self._players[playerIndex]
-            if gifPlayer then
-                pcall(gifPlayer.Destroy, gifPlayer)
-            end
-        end
-        table.clear(self._players)
-
-        if self._decoder then
-            self._decoder:Destroy()
-            self._decoder = nil
-        end
-        table.clear(self.Frames)
-        assetBridgeActiveResources[self] = nil
-    end
-
-    assetBridgeActiveResources[gifAnimation] = true
-
-    function gifAnimation:BuildAll()
-        if self._destroyed then
-            return false, "This GIF animation has been destroyed."
-        end
-        return assetBridgeGifEnsureFrameBuilt(self, self.FrameCount)
-    end
-
     function gifAnimation:Apply(targetImageObject)
-        if self._destroyed then
-            return false, "This GIF animation has been destroyed."
+        if typeof(targetImageObject) ~= "Instance" or not (targetImageObject:IsA("ImageLabel") or targetImageObject:IsA("ImageButton")) then
+            return false, "GIF animations can only be applied to ImageLabel or ImageButton instances."
         end
-        local appliedPlayer, appliedPlayerError = self:CreatePlayer(targetImageObject, {Looped = false})
-        if not appliedPlayer then
-            return false, appliedPlayerError
-        end
+
+        targetImageObject.Image = self.Frames[1].ImageId
         return true
     end
 
     function gifAnimation:CreatePlayer(targetImageObject, playerOptions)
         playerOptions = playerOptions or {}
 
-        if self._destroyed then
-            return nil, "This GIF animation has been destroyed."
-        end
         if typeof(targetImageObject) ~= "Instance" or not (targetImageObject:IsA("ImageLabel") or targetImageObject:IsA("ImageButton")) then
             return nil, "CreatePlayer() requires an ImageLabel or ImageButton."
         end
@@ -3344,14 +2142,6 @@ local function assetBridgeCreateGifAnimation(gifDownload, gifDecoded, gifOptions
         local player = setmetatable({
             _animation = self,
             _target = targetImageObject,
-            _originalTargetProperties = {
-                Image = targetImageObject.Image,
-                ImageTransparency = targetImageObject.ImageTransparency,
-                BackgroundColor3 = targetImageObject.BackgroundColor3,
-                BackgroundTransparency = targetImageObject.BackgroundTransparency
-            },
-            _layers = {},
-            _previousFrame = nil,
             _state = "stopped",
             _token = 0,
             _maximumPlaythroughs = maximumPlaythroughs,
@@ -3365,15 +2155,7 @@ local function assetBridgeCreateGifAnimation(gifDownload, gifDecoded, gifOptions
             Ended = endedEvent.Event
         }, assetBridgeGifPlayerMetatable)
 
-        assetBridgeActiveResources[player] = true
-        table.insert(self._players, player)
-        targetImageObject.Image = ""
-        targetImageObject.ImageTransparency = 1
-        local firstFrameSuccess, firstFrameError = assetBridgeGifSetPlayerFrame(player, 1)
-        if not firstFrameSuccess then
-            player:Destroy()
-            return nil, firstFrameError
-        end
+        assetBridgeGifSetPlayerFrame(player, 1)
         return player
     end
 
@@ -3392,110 +2174,13 @@ local function assetBridgeCreateGifAnimation(gifDownload, gifDecoded, gifOptions
         return gifPlayer
     end
 
-    assetBridgeGifEnsureFrameBuilt = function(animation, targetFrameIndex)
-        if animation._destroyed then
-            return false, "This GIF animation has been destroyed."
-        end
-
-        targetFrameIndex = math.clamp(math.floor(tonumber(targetFrameIndex) or 1), 1, animation.FrameCount)
-        local targetFrameData = animation.Frames[targetFrameIndex]
-        if targetFrameData and targetFrameData.FileReady and targetFrameData.FilePath then
-            return true
-        end
-
-        while animation._building and not animation._destroyed do
-            if targetFrameData and targetFrameData.FileReady and targetFrameData.FilePath then
-                return true
-            end
-            task.wait()
-        end
-
-        if animation._destroyed then
-            return false, "This GIF animation has been destroyed."
-        end
-        if targetFrameData and targetFrameData.FileReady and targetFrameData.FilePath then
-            return true
-        end
-
-        local decoder = animation._decoder
-        if not decoder or decoder._destroyed then
-            return false, "The GIF decoder is no longer available."
-        end
-        if decoder.DecodedFrameCount >= targetFrameIndex then
-            return false, "The requested GIF frame was decoded but its file is unavailable."
-        end
-
-        animation._building = true
-        local initialDecodedFrameCount = decoder.DecodedFrameCount
-        local requestedBuildCount = targetFrameIndex - initialDecodedFrameCount
-        local decodeCallSucceeded, decodedFrames, buildError = pcall(function()
-            return decoder:DecodeNextFramesParallel(
-                requestedBuildCount,
-                function(decodedFrame)
-                local animationFrameData = animation.Frames[decodedFrame.Index]
-                if animationFrameData then
-                    animationFrameData.FilePath = decodedFrame.FilePath
-                    animationFrameData.FileReady = true
-                    animationFrameData.Size = decodedFrame.Size or 0
-                    animationFrameData.OutputMode = decodedFrame.OutputMode
-                    animationFrameData.DecodeTime = decodedFrame.DecodeTime
-                    animationFrameData.LzwDecodeTime = decodedFrame.LzwDecodeTime
-                end
-                animation.TotalOutputBytes = decoder.TotalOutputBytes
-                animation.Stats = decoder.Stats
-
-                if type(animation._onFrameDecoded) == "function" then
-                    pcall(animation._onFrameDecoded, decodedFrame, decoder.DecodedFrameCount, animation.FrameCount)
-                end
-            end,
-            function(completedWorkers, workerTotal, frameIndex, succeeded, decodeError)
-                if type(animation._onDecodeProgress) == "function" then
-                    pcall(
-                        animation._onDecodeProgress,
-                        initialDecodedFrameCount + completedWorkers,
-                        animation.FrameCount,
-                        frameIndex,
-                        succeeded,
-                        decodeError
-                    )
-                end
-            end
-        )
-        end)
-        if not decodeCallSucceeded then
-            buildError = decodedFrames
-            decodedFrames = nil
-        end
-        animation._building = false
-        animation.TotalOutputBytes = decoder.TotalOutputBytes
-        animation.Stats = decoder.Stats
-
-        if not decodedFrames then
-            animation._buildError = buildError
-            return false, buildError
-        end
-
-        if not targetFrameData.FileReady or not targetFrameData.FilePath then
-            return false, animation._buildError or "The requested GIF frame was not generated."
-        end
-
-        animation._buildError = nil
-        return true
-    end
-
     return gifAnimation
 end
 
 function AssetBridge.GIF.Open(gifUrl, gifOptions)
     gifOptions = gifOptions or {}
 
-    local gifDownloadOptions = {}
-    for optionName, optionValue in pairs(gifOptions) do
-        gifDownloadOptions[optionName] = optionValue
-    end
-    gifDownloadOptions.MaxBytes = math.huge
-
-    local downloadedGif, gifDownloadError = assetBridgeDownload(gifUrl, "Image", gifDownloadOptions)
+    local downloadedGif, gifDownloadError = assetBridgeDownload(gifUrl, "Image", gifOptions)
     if not downloadedGif then
         return nil, gifDownloadError
     end
@@ -3514,7 +2199,7 @@ function AssetBridge.GIF.Open(gifUrl, gifOptions)
 
     if type(gifBytes) ~= "string" then
         local forcedOptions = {}
-        for optionName, optionValue in pairs(gifDownloadOptions) do
+        for optionName, optionValue in pairs(gifOptions) do
             forcedOptions[optionName] = optionValue
         end
         forcedOptions.Refresh = true
@@ -3549,19 +2234,23 @@ function AssetBridge.GIF.Fetch(gifUrl, gifOptions)
         return nil, gifOpenError
     end
 
+    local decodedFrames, parallelDecodeError = gifDecoder:DecodeNextFramesParallel(gifDecoder.FrameCount)
+    if not decodedFrames then
+        gifDecoder:Destroy()
+        return nil, parallelDecodeError
+    end
+
     local decodedAnimationData = {
         Width = gifDecoder.Width,
         Height = gifDecoder.Height,
-        Frames = gifDecoder.Frames,
+        Frames = decodedFrames,
         FrameCount = gifDecoder.FrameCount,
         Duration = gifDecoder.Duration,
         LoopExtensionFound = gifDecoder.LoopExtensionFound,
         LoopCount = gifDecoder.LoopCount,
         TotalPixels = gifDecoder.TotalPixels,
-        TotalOutputBytes = 0,
-        Stats = gifDecoder.Stats,
-        Cached = gifDecoder.Cached,
-        Decoder = gifDecoder
+        TotalOutputBytes = gifDecoder.TotalOutputBytes,
+        Cached = gifDecoder.Cached
     }
 
     local gifAnimation, animationError = assetBridgeCreateGifAnimation(
@@ -3570,16 +2259,8 @@ function AssetBridge.GIF.Fetch(gifUrl, gifOptions)
         gifOptions
     )
 
-    if not gifAnimation then
-        gifDecoder:Destroy()
-        return nil, animationError
-    end
-
-    if type(gifOptions.OnPrepared) == "function" then
-        pcall(gifOptions.OnPrepared, gifAnimation)
-    end
-
-    return gifAnimation
+    gifDecoder:Destroy()
+    return gifAnimation, animationError
 end
 
 local assetBridgeSoundEffectClasses = {
@@ -3633,7 +2314,6 @@ function assetBridgeSoundMethods:Destroy()
         rawset(self, "_sound", nil)
     end
     rawset(self, "_state", "destroyed")
-    assetBridgeActiveResources[self] = nil
 end
 
 function assetBridgeSoundMethods:WaitForLoaded(timeoutSeconds)
@@ -3790,12 +2470,552 @@ assetBridgeSoundMetatable.__newindex = function(soundWrapper, propertyName, prop
 end
 
 local function assetBridgeCreateSoundWrapper(soundInstance)
-    local soundWrapper = setmetatable({
+    return setmetatable({
         _sound = soundInstance,
         _state = "stopped"
     }, assetBridgeSoundMetatable)
-    assetBridgeActiveResources[soundWrapper] = true
-    return soundWrapper
+end
+
+local function assetBridgeAudioReadUInt24BE(audioBytes, audioPosition)
+    local audioByteOne, audioByteTwo, audioByteThree = string.byte(audioBytes, audioPosition, audioPosition + 2)
+    if not audioByteThree then
+        return nil
+    end
+    return audioByteOne * 65536 + audioByteTwo * 256 + audioByteThree
+end
+
+local function assetBridgeAudioReadUInt32BE(audioBytes, audioPosition)
+    local audioByteOne, audioByteTwo, audioByteThree, audioByteFour = string.byte(audioBytes, audioPosition, audioPosition + 3)
+    if not audioByteFour then
+        return nil
+    end
+    return audioByteOne * 16777216 + audioByteTwo * 65536 + audioByteThree * 256 + audioByteFour
+end
+
+local function assetBridgeAudioReadSynchsafeUInt32(audioBytes, audioPosition)
+    local audioByteOne, audioByteTwo, audioByteThree, audioByteFour = string.byte(audioBytes, audioPosition, audioPosition + 3)
+    if not audioByteFour then
+        return nil
+    end
+    return (audioByteOne % 128) * 2097152
+        + (audioByteTwo % 128) * 16384
+        + (audioByteThree % 128) * 128
+        + (audioByteFour % 128)
+end
+
+local function assetBridgeAudioReadUInt32LE(audioBytes, audioPosition)
+    local audioByteOne, audioByteTwo, audioByteThree, audioByteFour = string.byte(audioBytes, audioPosition, audioPosition + 3)
+    if not audioByteFour then
+        return nil
+    end
+    return audioByteOne + audioByteTwo * 256 + audioByteThree * 65536 + audioByteFour * 16777216
+end
+
+local function assetBridgeAudioFindTextTerminator(audioBytes, audioPosition, audioEncoding)
+    if audioEncoding == 1 or audioEncoding == 2 then
+        local audioSearchPosition = audioPosition
+        while audioSearchPosition + 1 <= #audioBytes do
+            if string.byte(audioBytes, audioSearchPosition) == 0 and string.byte(audioBytes, audioSearchPosition + 1) == 0 then
+                return audioSearchPosition
+            end
+            audioSearchPosition = audioSearchPosition + 2
+        end
+        return nil
+    end
+
+    return string.find(audioBytes, "\0", audioPosition, true)
+end
+
+local function assetBridgeAudioParseId3Picture(audioBytes)
+    if string.sub(audioBytes, 1, 3) ~= "ID3" then
+        return nil, "The audio file does not contain an ID3 tag."
+    end
+
+    local audioMajorVersion = string.byte(audioBytes, 4)
+    local audioTagFlags = string.byte(audioBytes, 6) or 0
+    local audioTagSize = assetBridgeAudioReadSynchsafeUInt32(audioBytes, 7)
+
+    if not audioMajorVersion or not audioTagSize or audioMajorVersion < 2 or audioMajorVersion > 4 then
+        return nil, "The ID3 tag version or size is not supported."
+    end
+
+    local audioTagEnd = math.min(#audioBytes, 10 + audioTagSize)
+    local audioFramePosition = 11
+
+    if audioMajorVersion == 3 and audioTagFlags % 128 >= 64 then
+        local audioExtendedHeaderSize = assetBridgeAudioReadUInt32BE(audioBytes, audioFramePosition)
+        if not audioExtendedHeaderSize then
+            return nil, "The ID3 extended header is incomplete."
+        end
+        audioFramePosition = audioFramePosition + 4 + audioExtendedHeaderSize
+    elseif audioMajorVersion == 4 and audioTagFlags % 128 >= 64 then
+        local audioExtendedHeaderSize = assetBridgeAudioReadSynchsafeUInt32(audioBytes, audioFramePosition)
+        if not audioExtendedHeaderSize or audioExtendedHeaderSize < 4 then
+            return nil, "The ID3 extended header is invalid."
+        end
+        audioFramePosition = audioFramePosition + audioExtendedHeaderSize
+    end
+
+    while audioFramePosition <= audioTagEnd do
+        local audioFrameHeaderSize = audioMajorVersion == 2 and 6 or 10
+        if audioFramePosition + audioFrameHeaderSize - 1 > audioTagEnd then
+            break
+        end
+
+        local audioFrameId = string.sub(audioBytes, audioFramePosition, audioFramePosition + (audioMajorVersion == 2 and 2 or 3))
+        if audioFrameId == "\0\0\0" or audioFrameId == "\0\0\0\0" or audioFrameId == "" then
+            break
+        end
+
+        local audioFrameSize
+        local audioFrameDataPosition
+        if audioMajorVersion == 2 then
+            audioFrameSize = assetBridgeAudioReadUInt24BE(audioBytes, audioFramePosition + 3)
+            audioFrameDataPosition = audioFramePosition + 6
+        elseif audioMajorVersion == 4 then
+            audioFrameSize = assetBridgeAudioReadSynchsafeUInt32(audioBytes, audioFramePosition + 4)
+            audioFrameDataPosition = audioFramePosition + 10
+        else
+            audioFrameSize = assetBridgeAudioReadUInt32BE(audioBytes, audioFramePosition + 4)
+            audioFrameDataPosition = audioFramePosition + 10
+        end
+
+        if not audioFrameSize or audioFrameSize <= 0 or audioFrameDataPosition + audioFrameSize - 1 > audioTagEnd then
+            break
+        end
+
+        if audioFrameId == "APIC" or audioFrameId == "PIC" then
+            local audioEncoding = string.byte(audioBytes, audioFrameDataPosition)
+            if not audioEncoding then
+                return nil, "The ID3 artwork frame is incomplete."
+            end
+
+            local audioMimeType
+            local audioPictureTypePosition
+
+            if audioFrameId == "PIC" then
+                local audioPictureFormat = string.upper(string.sub(audioBytes, audioFrameDataPosition + 1, audioFrameDataPosition + 3))
+                audioMimeType = audioPictureFormat == "PNG" and "image/png" or audioPictureFormat == "GIF" and "image/gif" or "image/jpeg"
+                audioPictureTypePosition = audioFrameDataPosition + 4
+            else
+                local audioMimeStart = audioFrameDataPosition + 1
+                local audioMimeEnd = string.find(audioBytes, "\0", audioMimeStart, true)
+                if not audioMimeEnd then
+                    return nil, "The ID3 artwork MIME type is incomplete."
+                end
+                audioMimeType = string.sub(audioBytes, audioMimeStart, audioMimeEnd - 1)
+                audioPictureTypePosition = audioMimeEnd + 1
+            end
+
+            local audioDescriptionStart = audioPictureTypePosition + 1
+            local audioDescriptionEnd = assetBridgeAudioFindTextTerminator(audioBytes, audioDescriptionStart, audioEncoding)
+            if not audioDescriptionEnd then
+                return nil, "The ID3 artwork description is incomplete."
+            end
+
+            local audioArtworkStart
+            if audioEncoding == 1 or audioEncoding == 2 then
+                audioArtworkStart = audioDescriptionEnd + 2
+            else
+                audioArtworkStart = audioDescriptionEnd + 1
+            end
+
+            local audioFrameEnd = audioFrameDataPosition + audioFrameSize - 1
+            if audioArtworkStart <= audioFrameEnd then
+                return string.sub(audioBytes, audioArtworkStart, audioFrameEnd), audioMimeType
+            end
+
+            return nil, "The ID3 artwork frame does not contain image data."
+        end
+
+        audioFramePosition = audioFrameDataPosition + audioFrameSize
+    end
+
+    return nil, "No embedded ID3 artwork was found."
+end
+
+local function assetBridgeAudioParseFlacPictureBlock(audioBytes, audioBlockStart, audioBlockEnd)
+    local audioPosition = audioBlockStart
+    local audioPictureType = assetBridgeAudioReadUInt32BE(audioBytes, audioPosition)
+    if not audioPictureType then
+        return nil
+    end
+    audioPosition = audioPosition + 4
+
+    local audioMimeLength = assetBridgeAudioReadUInt32BE(audioBytes, audioPosition)
+    if not audioMimeLength or audioMimeLength > audioBlockEnd - audioPosition then
+        return nil
+    end
+    audioPosition = audioPosition + 4
+    local audioMimeType = string.sub(audioBytes, audioPosition, audioPosition + audioMimeLength - 1)
+    audioPosition = audioPosition + audioMimeLength
+
+    local audioDescriptionLength = assetBridgeAudioReadUInt32BE(audioBytes, audioPosition)
+    if not audioDescriptionLength or audioDescriptionLength > audioBlockEnd - audioPosition then
+        return nil
+    end
+    audioPosition = audioPosition + 4 + audioDescriptionLength
+
+    if audioPosition + 19 > audioBlockEnd then
+        return nil
+    end
+
+    audioPosition = audioPosition + 16
+    local audioPictureDataLength = assetBridgeAudioReadUInt32BE(audioBytes, audioPosition)
+    if not audioPictureDataLength then
+        return nil
+    end
+    audioPosition = audioPosition + 4
+
+    if audioPictureDataLength <= 0 or audioPosition + audioPictureDataLength - 1 > audioBlockEnd then
+        return nil
+    end
+
+    return string.sub(audioBytes, audioPosition, audioPosition + audioPictureDataLength - 1), audioMimeType
+end
+
+local function assetBridgeAudioParseFlacPicture(audioBytes)
+    if string.sub(audioBytes, 1, 4) ~= "fLaC" then
+        return nil, "The audio file is not a native FLAC stream."
+    end
+
+    local audioMetadataPosition = 5
+    while audioMetadataPosition + 3 <= #audioBytes do
+        local audioBlockHeader = string.byte(audioBytes, audioMetadataPosition)
+        local audioBlockLength = assetBridgeAudioReadUInt24BE(audioBytes, audioMetadataPosition + 1)
+        if not audioBlockLength then
+            break
+        end
+
+        local audioBlockType = audioBlockHeader % 128
+        local audioBlockStart = audioMetadataPosition + 4
+        local audioBlockEnd = audioBlockStart + audioBlockLength - 1
+        if audioBlockEnd > #audioBytes then
+            break
+        end
+
+        if audioBlockType == 6 then
+            local audioArtworkBytes, audioArtworkMime = assetBridgeAudioParseFlacPictureBlock(audioBytes, audioBlockStart, audioBlockEnd)
+            if audioArtworkBytes then
+                return audioArtworkBytes, audioArtworkMime
+            end
+        end
+
+        if audioBlockHeader >= 128 then
+            break
+        end
+        audioMetadataPosition = audioBlockEnd + 1
+    end
+
+    return nil, "No embedded FLAC picture block was found."
+end
+
+local function assetBridgeAudioDecodeBase64(audioBase64Text)
+    local audioBase64Alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+    local audioBase64Output = {}
+    local audioBase64Accumulator = 0
+    local audioBase64BitCount = 0
+
+    for audioBase64Position = 1, #audioBase64Text do
+        local audioBase64Character = string.sub(audioBase64Text, audioBase64Position, audioBase64Position)
+        if audioBase64Character == "=" then
+            break
+        end
+
+        local audioBase64Value = string.find(audioBase64Alphabet, audioBase64Character, 1, true)
+        if not audioBase64Value then
+            return nil
+        end
+
+        audioBase64Accumulator = audioBase64Accumulator * 64 + audioBase64Value - 1
+        audioBase64BitCount = audioBase64BitCount + 6
+
+        if audioBase64BitCount >= 8 then
+            audioBase64BitCount = audioBase64BitCount - 8
+            local audioDecodedByte = math.floor(audioBase64Accumulator / (2 ^ audioBase64BitCount)) % 256
+            audioBase64Output[#audioBase64Output + 1] = string.char(audioDecodedByte)
+            audioBase64Accumulator = audioBase64Accumulator % (2 ^ audioBase64BitCount)
+        end
+    end
+
+    if #audioBase64Output == 0 then
+        return nil
+    end
+    return table.concat(audioBase64Output)
+end
+
+local function assetBridgeAudioParseVorbisCommentPacket(audioPacketBytes)
+    local audioCommentPosition
+    if string.sub(audioPacketBytes, 1, 7) == "\3vorbis" then
+        audioCommentPosition = 8
+    elseif string.sub(audioPacketBytes, 1, 8) == "OpusTags" then
+        audioCommentPosition = 9
+    else
+        return nil
+    end
+
+    local audioVendorLength = assetBridgeAudioReadUInt32LE(audioPacketBytes, audioCommentPosition)
+    if not audioVendorLength then
+        return nil
+    end
+    audioCommentPosition = audioCommentPosition + 4 + audioVendorLength
+
+    local audioCommentCount = assetBridgeAudioReadUInt32LE(audioPacketBytes, audioCommentPosition)
+    if not audioCommentCount or audioCommentCount > 10000 then
+        return nil
+    end
+    audioCommentPosition = audioCommentPosition + 4
+
+    local audioLegacyCoverBytes
+    local audioLegacyCoverMime
+
+    for audioCommentIndex = 1, audioCommentCount do
+        local audioCommentLength = assetBridgeAudioReadUInt32LE(audioPacketBytes, audioCommentPosition)
+        if not audioCommentLength then
+            break
+        end
+        audioCommentPosition = audioCommentPosition + 4
+
+        if audioCommentLength <= 0 or audioCommentPosition + audioCommentLength - 1 > #audioPacketBytes then
+            break
+        end
+
+        local audioCommentText = string.sub(audioPacketBytes, audioCommentPosition, audioCommentPosition + audioCommentLength - 1)
+        audioCommentPosition = audioCommentPosition + audioCommentLength
+        local audioEqualsPosition = string.find(audioCommentText, "=", 1, true)
+
+        if audioEqualsPosition then
+            local audioCommentName = string.upper(string.sub(audioCommentText, 1, audioEqualsPosition - 1))
+            local audioCommentValue = string.sub(audioCommentText, audioEqualsPosition + 1)
+
+            if audioCommentName == "METADATA_BLOCK_PICTURE" then
+                local audioPictureBlockBytes = assetBridgeAudioDecodeBase64(audioCommentValue)
+                if audioPictureBlockBytes then
+                    local audioArtworkBytes, audioArtworkMime = assetBridgeAudioParseFlacPictureBlock(
+                        audioPictureBlockBytes,
+                        1,
+                        #audioPictureBlockBytes
+                    )
+                    if audioArtworkBytes then
+                        return audioArtworkBytes, audioArtworkMime
+                    end
+                end
+            elseif audioCommentName == "COVERART" then
+                audioLegacyCoverBytes = assetBridgeAudioDecodeBase64(audioCommentValue)
+            elseif audioCommentName == "COVERARTMIME" then
+                audioLegacyCoverMime = audioCommentValue
+            end
+        end
+    end
+
+    if audioLegacyCoverBytes then
+        return audioLegacyCoverBytes, audioLegacyCoverMime
+    end
+
+    return nil
+end
+
+local function assetBridgeAudioParseOggArtwork(audioBytes)
+    local audioPagePosition = 1
+    local audioPacketBuffer = ""
+
+    while audioPagePosition + 26 <= #audioBytes do
+        if string.sub(audioBytes, audioPagePosition, audioPagePosition + 3) ~= "OggS" then
+            local audioNextPagePosition = string.find(audioBytes, "OggS", audioPagePosition + 1, true)
+            if not audioNextPagePosition then
+                break
+            end
+            audioPagePosition = audioNextPagePosition
+        end
+
+        local audioSegmentCount = string.byte(audioBytes, audioPagePosition + 26)
+        local audioSegmentTableStart = audioPagePosition + 27
+        local audioPageBodyPosition = audioSegmentTableStart + audioSegmentCount
+        if audioPageBodyPosition - 1 > #audioBytes then
+            break
+        end
+
+        for audioSegmentIndex = 0, audioSegmentCount - 1 do
+            local audioSegmentLength = string.byte(audioBytes, audioSegmentTableStart + audioSegmentIndex) or 0
+            local audioSegmentEnd = audioPageBodyPosition + audioSegmentLength - 1
+
+            if audioSegmentEnd > #audioBytes then
+                return nil, "The OGG page is incomplete."
+            end
+
+            if audioSegmentLength > 0 then
+                audioPacketBuffer = audioPacketBuffer .. string.sub(audioBytes, audioPageBodyPosition, audioSegmentEnd)
+            end
+            audioPageBodyPosition = audioPageBodyPosition + audioSegmentLength
+
+            if audioSegmentLength < 255 then
+                local audioArtworkBytes, audioArtworkMime = assetBridgeAudioParseVorbisCommentPacket(audioPacketBuffer)
+                if audioArtworkBytes then
+                    return audioArtworkBytes, audioArtworkMime
+                end
+                audioPacketBuffer = ""
+            end
+        end
+
+        audioPagePosition = audioPageBodyPosition
+    end
+
+    return nil, "No embedded OGG/Vorbis/Opus cover artwork was found."
+end
+
+local function assetBridgeAudioFindMp4Artwork(audioBytes, audioRangeStart, audioRangeEnd, audioDepth, audioInsideCoverAtom)
+    if audioDepth > 12 then
+        return nil
+    end
+
+    local audioAtomPosition = audioRangeStart
+    while audioAtomPosition + 7 <= audioRangeEnd do
+        local audioAtomSize = assetBridgeAudioReadUInt32BE(audioBytes, audioAtomPosition)
+        local audioAtomType = string.sub(audioBytes, audioAtomPosition + 4, audioAtomPosition + 7)
+        if not audioAtomSize then
+            break
+        end
+
+        local audioAtomHeaderSize = 8
+        if audioAtomSize == 1 then
+            local audioAtomHighSize = assetBridgeAudioReadUInt32BE(audioBytes, audioAtomPosition + 8)
+            local audioAtomLowSize = assetBridgeAudioReadUInt32BE(audioBytes, audioAtomPosition + 12)
+            if not audioAtomHighSize or not audioAtomLowSize or audioAtomHighSize > 0 then
+                break
+            end
+            audioAtomSize = audioAtomLowSize
+            audioAtomHeaderSize = 16
+        elseif audioAtomSize == 0 then
+            audioAtomSize = audioRangeEnd - audioAtomPosition + 1
+        end
+
+        if audioAtomSize < audioAtomHeaderSize then
+            break
+        end
+
+        local audioAtomEnd = audioAtomPosition + audioAtomSize - 1
+        if audioAtomEnd > audioRangeEnd then
+            break
+        end
+
+        local audioAtomPayloadStart = audioAtomPosition + audioAtomHeaderSize
+        if audioInsideCoverAtom and audioAtomType == "data" then
+            local audioArtworkStart = audioAtomPayloadStart + 8
+            if audioArtworkStart <= audioAtomEnd then
+                local audioArtworkBytes = string.sub(audioBytes, audioArtworkStart, audioAtomEnd)
+                local audioArtworkExtension = assetBridgeDetectExtension(audioArtworkBytes, nil, "embedded-artwork.bin")
+                if audioArtworkExtension and assetBridgeImageExtensions[audioArtworkExtension] then
+                    return audioArtworkBytes, "image/" .. (audioArtworkExtension == "jpg" and "jpeg" or audioArtworkExtension)
+                end
+            end
+        elseif audioAtomType == "covr" then
+            local audioArtworkBytes, audioArtworkMime = assetBridgeAudioFindMp4Artwork(
+                audioBytes,
+                audioAtomPayloadStart,
+                audioAtomEnd,
+                audioDepth + 1,
+                true
+            )
+            if audioArtworkBytes then
+                return audioArtworkBytes, audioArtworkMime
+            end
+        elseif audioAtomType == "moov" or audioAtomType == "udta" or audioAtomType == "meta" or audioAtomType == "ilst" then
+            local audioChildStart = audioAtomPayloadStart
+            if audioAtomType == "meta" then
+                audioChildStart = audioChildStart + 4
+            end
+            if audioChildStart <= audioAtomEnd then
+                local audioArtworkBytes, audioArtworkMime = assetBridgeAudioFindMp4Artwork(
+                    audioBytes,
+                    audioChildStart,
+                    audioAtomEnd,
+                    audioDepth + 1,
+                    false
+                )
+                if audioArtworkBytes then
+                    return audioArtworkBytes, audioArtworkMime
+                end
+            end
+        end
+
+        audioAtomPosition = audioAtomEnd + 1
+    end
+
+    return nil
+end
+
+local function assetBridgeAudioParseMp4Artwork(audioBytes)
+    local audioArtworkBytes, audioArtworkMime = assetBridgeAudioFindMp4Artwork(audioBytes, 1, #audioBytes, 0, false)
+    if audioArtworkBytes then
+        return audioArtworkBytes, audioArtworkMime
+    end
+    return nil, "No embedded M4A/MP4 cover artwork was found."
+end
+
+local function assetBridgeAudioExtractArtworkBytes(downloadedAudio)
+    local audioBytes = downloadedAudio.Bytes
+    if type(audioBytes) ~= "string" and type(assetBridgeReadFileFunction) == "function" then
+        local audioReadSuccess, audioReadResult = pcall(assetBridgeReadFileFunction, downloadedAudio.FilePath)
+        if audioReadSuccess and type(audioReadResult) == "string" then
+            audioBytes = audioReadResult
+        end
+    end
+
+    if type(audioBytes) ~= "string" then
+        return nil, "The cached audio bytes are unavailable; this executor needs readfile() to extract embedded artwork from cached tracks."
+    end
+
+    if downloadedAudio.Extension == "mp3" or string.sub(audioBytes, 1, 3) == "ID3" then
+        return assetBridgeAudioParseId3Picture(audioBytes)
+    elseif downloadedAudio.Extension == "flac" or string.sub(audioBytes, 1, 4) == "fLaC" then
+        return assetBridgeAudioParseFlacPicture(audioBytes)
+    elseif downloadedAudio.Extension == "m4a" or string.sub(audioBytes, 5, 8) == "ftyp" then
+        return assetBridgeAudioParseMp4Artwork(audioBytes)
+    elseif downloadedAudio.Extension == "ogg" or downloadedAudio.Extension == "oga" or string.sub(audioBytes, 1, 4) == "OggS" then
+        return assetBridgeAudioParseOggArtwork(audioBytes)
+    end
+
+    return nil, "Embedded artwork extraction is currently supported for MP3/ID3, FLAC, M4A/MP4 and OGG/Vorbis/Opus files."
+end
+
+local function assetBridgeCreateAudioArtworkAsset(downloadedAudio, audioOptions)
+    local audioArtworkBytes, audioArtworkMime = assetBridgeAudioExtractArtworkBytes(downloadedAudio)
+    if not audioArtworkBytes then
+        return nil, audioArtworkMime or "No embedded artwork was found."
+    end
+
+    local audioMaximumArtworkBytes = tonumber(audioOptions.MaxArtworkBytes) or 10485760
+    if #audioArtworkBytes > audioMaximumArtworkBytes then
+        return nil, "The embedded artwork exceeds the configured MaxArtworkBytes limit."
+    end
+
+    local audioArtworkExtension = assetBridgeDetectExtension(audioArtworkBytes, audioArtworkMime, "embedded-artwork.bin")
+    if not audioArtworkExtension or not assetBridgeImageExtensions[audioArtworkExtension] then
+        return nil, "The embedded artwork uses an unsupported image format."
+    end
+
+    local audioArtworkHash = assetBridgeHashString(downloadedAudio.Url .. ":artwork:" .. assetBridgeHashString(audioArtworkBytes))
+    local audioArtworkPath = "AssetBridge_AudioArtwork_" .. audioArtworkHash .. "." .. audioArtworkExtension
+    local audioArtworkCached = assetBridgeFileExists(audioArtworkPath)
+
+    if not audioArtworkCached then
+        if type(assetBridgeWriteFileFunction) ~= "function" then
+            return nil, "This executor does not expose writefile() for embedded artwork caching."
+        end
+
+        local audioArtworkWriteSuccess, audioArtworkWriteError = pcall(assetBridgeWriteFileFunction, audioArtworkPath, audioArtworkBytes)
+        if not audioArtworkWriteSuccess then
+            return nil, "Could not cache the embedded artwork: " .. tostring(audioArtworkWriteError)
+        end
+    end
+
+    return assetBridgeCreateImageAsset({
+        Url = "embedded-artwork://" .. tostring(downloadedAudio.Url),
+        FilePath = audioArtworkPath,
+        Extension = audioArtworkExtension,
+        Size = #audioArtworkBytes,
+        Cached = audioArtworkCached
+    })
 end
 
 local function assetBridgeCreateAudioAsset(downloadedAsset, audioOptions)
@@ -3812,10 +3032,43 @@ local function assetBridgeCreateAudioAsset(downloadedAsset, audioOptions)
         FilePath = downloadedAsset.FilePath,
         Format = downloadedAsset.Extension,
         Size = downloadedAsset.Size,
-        Cached = downloadedAsset.Cached
+        Cached = downloadedAsset.Cached,
+        Artwork = nil,
+        ArtworkImageId = nil,
+        ArtworkFilePath = nil,
+        ArtworkError = nil
     }
 
     audioAsset.SoundID = audioAsset.SoundId
+
+    function audioAsset:ExtractArtwork()
+        if self.Artwork then
+            return self.Artwork
+        end
+
+        local extractedArtwork, artworkError = assetBridgeCreateAudioArtworkAsset(downloadedAsset, audioOptions)
+        if not extractedArtwork then
+            self.ArtworkError = artworkError
+            return nil, artworkError
+        end
+
+        self.Artwork = extractedArtwork
+        self.ArtworkImageId = extractedArtwork.ImageId
+        self.ArtworkFilePath = extractedArtwork.FilePath
+        self.ArtworkError = nil
+        return extractedArtwork
+    end
+
+    function audioAsset:GetArtwork()
+        if self.Artwork then
+            return self.Artwork
+        end
+        return nil, self.ArtworkError or "Embedded artwork has not been extracted."
+    end
+
+    if audioOptions.ExtractArtwork ~= false then
+        audioAsset:ExtractArtwork()
+    end
 
     function audioAsset:CreateSound(parentInstance, soundProperties)
         soundProperties = soundProperties or {}
@@ -3908,83 +3161,30 @@ function AssetBridge.Cache.ClearDisk()
     end
 
     local listFilesFunction = assetBridgeSafeGetGlobal("listfiles")
+    if type(listFilesFunction) ~= "function" then
+        return false, "This executor does not expose listfiles()."
+    end
+
+    local listSuccess, listedFiles = pcall(listFilesFunction, "")
+    if not listSuccess or type(listedFiles) ~= "table" then
+        return false, "Could not list files in the executor root."
+    end
+
     local deletedCount = 0
 
-    for trackedFilePath in pairs(assetBridgeTrackedFiles) do
-        local deleteSuccess = pcall(assetBridgeDeleteFileFunction, trackedFilePath)
-        if deleteSuccess then
-            deletedCount = deletedCount + 1
-        end
-        assetBridgeTrackedFiles[trackedFilePath] = nil
-    end
-    local function clearCacheFolder(folderPath)
-        local listSuccess, listedEntries = pcall(listFilesFunction, folderPath)
-        if not listSuccess or type(listedEntries) ~= "table" then
-            return
-        end
-
-        for _, listedPath in ipairs(listedEntries) do
-            local entryPath = tostring(listedPath)
-            local isDirectory = false
-            if type(assetBridgeIsFolderFunction) == "function" then
-                local folderCheckSuccess, folderCheckResult = pcall(assetBridgeIsFolderFunction, entryPath)
-                isDirectory = folderCheckSuccess and folderCheckResult == true
-            end
-            if not isDirectory then
-                local nestedListSuccess, nestedEntries = pcall(listFilesFunction, entryPath)
-                isDirectory = nestedListSuccess and type(nestedEntries) == "table"
-            end
-
-            if isDirectory then
-                clearCacheFolder(entryPath)
-            else
-                local deleteSuccess = pcall(assetBridgeDeleteFileFunction, entryPath)
-                if deleteSuccess then
-                    deletedCount = deletedCount + 1
-                end
+    for _, filePath in ipairs(listedFiles) do
+        local fileName = tostring(filePath):match("([^/\\]+)$") or tostring(filePath)
+        if string.match(fileName, "^AssetBridge_[%w_%-]+%.[%w]+$") then
+            local deleteSuccess = pcall(assetBridgeDeleteFileFunction, filePath)
+            if deleteSuccess then
+                deletedCount = deletedCount + 1
             end
         end
     end
 
-    if type(listFilesFunction) == "function" then
-        for _, cacheFolderPath in pairs(assetBridgeCacheDirectories) do
-            clearCacheFolder(cacheFolderPath)
-        end
-    end
-
+    table.clear(assetBridgeMemoryCache)
     return true, deletedCount
 end
-
-function AssetBridge.Close()
-    if assetBridgeCloseInProgress then
-        return false, "AssetBridge is already closing."
-    end
-    assetBridgeCloseInProgress = true
-    assetBridgeSessionGeneration = assetBridgeSessionGeneration + 1
-
-    local activeResources = {}
-    for activeResource in pairs(assetBridgeActiveResources) do
-        activeResources[#activeResources + 1] = activeResource
-    end
-
-    for _, activeResource in ipairs(activeResources) do
-        local destroyFunction = activeResource.Destroy
-        if type(destroyFunction) == "function" then
-            pcall(destroyFunction, activeResource)
-        end
-    end
-
-    table.clear(assetBridgeActiveResources)
-    AssetBridge.Cache.ClearMemory()
-    local cleanupSuccess, deletedFileCountOrError = AssetBridge.Cache.ClearDisk()
-    assetBridgeCloseInProgress = false
-    if not cleanupSuccess then
-        return false, deletedFileCountOrError
-    end
-    return true, deletedFileCountOrError
-end
-
-AssetBridge.Destroy = AssetBridge.Close
 
 assetBridgeRefreshCapabilities()
 
