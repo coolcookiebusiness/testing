@@ -1,17 +1,12 @@
 local AssetBridge = {
     Name = "AssetBridge",
-    Version = "0.1.0",
+    Version = "0.1.1",
     Config = {
         Cache = true,
-        MaxBytes = 52428800,
-        DefaultImageMethod = "Auto",
-        MaxImageBuilderResolution = 128,
-        MaxImageBuilderSegments = 12000,
-        Decoder = nil
+        MaxBytes = 52428800
     },
     Image = {},
     Audio = {},
-    ImageBuilder = {},
     Cache = {},
     Capabilities = {}
 }
@@ -108,9 +103,7 @@ local function assetBridgeRefreshCapabilities()
         ReadFile = type(assetBridgeReadFileFunction) == "function",
         IsFile = type(assetBridgeIsFileFunction) == "function",
         DeleteFile = type(assetBridgeDeleteFileFunction) == "function",
-        GetCustomAsset = type(assetBridgeGetCustomAssetFunction) == "function",
-        Buffer = type(buffer) == "table",
-        ImageDecoder = type(AssetBridge.Config.Decoder) == "function"
+        GetCustomAsset = type(assetBridgeGetCustomAssetFunction) == "function"
     }
 
     return AssetBridge.Capabilities
@@ -434,298 +427,48 @@ local function assetBridgeGetCustomAssetId(assetBridgeFilePath)
     return assetBridgeAssetId
 end
 
-local function assetBridgeGetPixel(decodedImage, pixelX, pixelY)
-    local pixelIndex = (pixelY * decodedImage.Width + pixelX) + 1
-    local pixelContainer = decodedImage.Pixels
+local function assetBridgeCreateImageAsset(downloadedAsset)
+    local imageAssetId, assetIdError = assetBridgeGetCustomAssetId(downloadedAsset.FilePath)
 
-    if type(pixelContainer) == "string" then
-        local byteIndex = (pixelIndex - 1) * 4 + 1
-        local redValue, greenValue, blueValue, alphaValue = string.byte(pixelContainer, byteIndex, byteIndex + 3)
-        return redValue or 0, greenValue or 0, blueValue or 0, alphaValue or 255
-    end
-
-    if type(pixelContainer) == "table" then
-        local pixelValue = pixelContainer[pixelIndex]
-
-        if type(pixelValue) == "table" then
-            local redValue = pixelValue.R or pixelValue.r or pixelValue[1] or 0
-            local greenValue = pixelValue.G or pixelValue.g or pixelValue[2] or 0
-            local blueValue = pixelValue.B or pixelValue.b or pixelValue[3] or 0
-            local alphaValue = pixelValue.A or pixelValue.a or pixelValue[4] or 255
-            return redValue, greenValue, blueValue, alphaValue
-        end
-
-        if type(pixelValue) == "number" then
-            local byteIndex = (pixelIndex - 1) * 4 + 1
-            local redValue = pixelContainer[byteIndex] or 0
-            local greenValue = pixelContainer[byteIndex + 1] or 0
-            local blueValue = pixelContainer[byteIndex + 2] or 0
-            local alphaValue = pixelContainer[byteIndex + 3] or 255
-            return redValue, greenValue, blueValue, alphaValue
-        end
-    end
-
-    if type(pixelContainer) == "buffer" and type(buffer) == "table" then
-        local byteIndex = (pixelIndex - 1) * 4
-        return buffer.readu8(pixelContainer, byteIndex), buffer.readu8(pixelContainer, byteIndex + 1), buffer.readu8(pixelContainer, byteIndex + 2), buffer.readu8(pixelContainer, byteIndex + 3)
-    end
-
-    error("Decoded image Pixels must be a row-major RGBA string, buffer, or pixel table.")
-end
-
-local function assetBridgeNormalizePixelChannel(channelValue)
-    local normalizedChannel = tonumber(channelValue) or 0
-
-    if normalizedChannel >= 0 and normalizedChannel <= 1 then
-        normalizedChannel = normalizedChannel * 255
-    end
-
-    return math.clamp(math.floor(normalizedChannel + 0.5), 0, 255)
-end
-
-function AssetBridge.ImageBuilder.Render(targetImageObject, decodedImage, renderOptions)
-    renderOptions = renderOptions or {}
-
-    if typeof(targetImageObject) ~= "Instance" or not (targetImageObject:IsA("ImageLabel") or targetImageObject:IsA("ImageButton")) then
-        return nil, "ImageBuilder.Render() requires an ImageLabel or ImageButton."
-    end
-
-    if type(decodedImage) ~= "table" then
-        return nil, "Decoded image data must be a table."
-    end
-
-    local decodedWidth = tonumber(decodedImage.Width or decodedImage.width)
-    local decodedHeight = tonumber(decodedImage.Height or decodedImage.height)
-    local decodedPixels = decodedImage.Pixels or decodedImage.pixels
-
-    if not decodedWidth or not decodedHeight or decodedWidth < 1 or decodedHeight < 1 or not decodedPixels then
-        return nil, "Decoded image data requires Width, Height and Pixels."
-    end
-
-    decodedWidth = math.floor(decodedWidth)
-    decodedHeight = math.floor(decodedHeight)
-    decodedImage = {
-        Width = decodedWidth,
-        Height = decodedHeight,
-        Pixels = decodedPixels
-    }
-
-    local maximumResolution = tonumber(renderOptions.MaxResolution) or tonumber(AssetBridge.Config.MaxImageBuilderResolution) or 128
-    local resizeScale = math.min(1, maximumResolution / math.max(decodedWidth, decodedHeight))
-    local renderWidth = math.max(1, math.floor(decodedWidth * resizeScale))
-    local renderHeight = math.max(1, math.floor(decodedHeight * resizeScale))
-    local maximumSegments = tonumber(renderOptions.MaxSegments) or tonumber(AssetBridge.Config.MaxImageBuilderSegments) or 12000
-    local renderSegments = {}
-
-    for renderY = 0, renderHeight - 1 do
-        local sourceY = math.min(decodedHeight - 1, math.floor((renderY + 0.5) * decodedHeight / renderHeight))
-        local activeRun = nil
-
-        for renderX = 0, renderWidth - 1 do
-            local sourceX = math.min(decodedWidth - 1, math.floor((renderX + 0.5) * decodedWidth / renderWidth))
-            local redValue, greenValue, blueValue, alphaValue = assetBridgeGetPixel(decodedImage, sourceX, sourceY)
-            redValue = assetBridgeNormalizePixelChannel(redValue)
-            greenValue = assetBridgeNormalizePixelChannel(greenValue)
-            blueValue = assetBridgeNormalizePixelChannel(blueValue)
-            alphaValue = assetBridgeNormalizePixelChannel(alphaValue)
-
-            local currentPixelKey = string.format("%d:%d:%d:%d", redValue, greenValue, blueValue, alphaValue)
-
-            if alphaValue == 0 then
-                if activeRun then
-                    table.insert(renderSegments, activeRun)
-                    activeRun = nil
-                end
-            elseif activeRun and activeRun.Key == currentPixelKey then
-                activeRun.Width = activeRun.Width + 1
-            else
-                if activeRun then
-                    table.insert(renderSegments, activeRun)
-                end
-
-                activeRun = {
-                    X = renderX,
-                    Y = renderY,
-                    Width = 1,
-                    Red = redValue,
-                    Green = greenValue,
-                    Blue = blueValue,
-                    Alpha = alphaValue,
-                    Key = currentPixelKey
-                }
-            end
-
-            if #renderSegments > maximumSegments then
-                return nil, "ImageBuilder exceeded MaxSegments. Reduce MaxResolution."
-            end
-        end
-
-        if activeRun then
-            table.insert(renderSegments, activeRun)
-        end
-
-        if #renderSegments > maximumSegments then
-            return nil, "ImageBuilder exceeded MaxSegments. Reduce MaxResolution."
-        end
-    end
-
-    local overlayFrame = assetBridgeInstanceNew("Frame")
-    overlayFrame.Name = "AssetBridge_ImageBuilder"
-    overlayFrame.BackgroundTransparency = 1
-    overlayFrame.BorderSizePixel = 0
-    overlayFrame.ClipsDescendants = true
-    overlayFrame.Active = false
-    overlayFrame.Selectable = false
-    overlayFrame.Position = UDim2.new(0, 0, 0, 0)
-    overlayFrame.Size = UDim2.new(1, 0, 1, 0)
-    overlayFrame.ZIndex = targetImageObject.ZIndex + 1
-    overlayFrame.Parent = targetImageObject
-
-    for segmentIndex, segmentData in ipairs(renderSegments) do
-        local pixelFrame = assetBridgeInstanceNew("Frame")
-        pixelFrame.Name = "Pixel_" .. segmentIndex
-        pixelFrame.BorderSizePixel = 0
-        pixelFrame.BackgroundColor3 = Color3.fromRGB(segmentData.Red, segmentData.Green, segmentData.Blue)
-        pixelFrame.BackgroundTransparency = 1 - (segmentData.Alpha / 255)
-        pixelFrame.Position = UDim2.new(segmentData.X / renderWidth, 0, segmentData.Y / renderHeight, 0)
-        pixelFrame.Size = UDim2.new(segmentData.Width / renderWidth, 0, 1 / renderHeight, 0)
-        pixelFrame.ZIndex = overlayFrame.ZIndex
-        pixelFrame.Active = false
-        pixelFrame.Selectable = false
-        pixelFrame.Parent = overlayFrame
-    end
-
-    targetImageObject.Image = ""
-
-    local renderHandle = {
-        Instance = overlayFrame,
-        Width = renderWidth,
-        Height = renderHeight,
-        SegmentCount = #renderSegments
-    }
-
-    function renderHandle:Destroy()
-        if self.Instance then
-            self.Instance:Destroy()
-            self.Instance = nil
-        end
-    end
-
-    return renderHandle
-end
-
-local function assetBridgeCreateImageAsset(downloadedAsset, imageOptions)
-    imageOptions = imageOptions or {}
-
-    local imageMethod = imageOptions.Method or AssetBridge.Config.DefaultImageMethod or "Auto"
-    local imageAssetId = nil
-    local assetIdError = nil
-
-    if imageMethod ~= "ImageBuilder" then
-        imageAssetId, assetIdError = assetBridgeGetCustomAssetId(downloadedAsset.FilePath)
-    end
-
-    local decodedImageData = nil
-    local imageDecoder = imageOptions.Decoder or AssetBridge.Config.Decoder
-
-    if type(imageDecoder) == "function" then
-        local downloadedBytes = downloadedAsset.Bytes
-
-        if not downloadedBytes and type(assetBridgeReadFileFunction) == "function" then
-            local readSuccess, readResult = pcall(assetBridgeReadFileFunction, downloadedAsset.FilePath)
-            if readSuccess and type(readResult) == "string" then
-                downloadedBytes = readResult
-            end
-        end
-
-        if downloadedBytes then
-            local decodeSuccess, decodeResult = pcall(imageDecoder, downloadedBytes, downloadedAsset)
-            if decodeSuccess and type(decodeResult) == "table" then
-                decodedImageData = decodeResult
-            elseif imageMethod == "ImageBuilder" then
-                return nil, "Image decoder failed: " .. tostring(decodeResult)
-            end
-        end
-    end
-
-    if imageMethod == "ImageBuilder" and not decodedImageData then
-        return nil, "ImageBuilder requires a Decoder function that returns {Width, Height, Pixels}."
-    end
-
-    if not imageAssetId and not decodedImageData then
-        return nil, assetIdError or "No usable native image asset reference or image decoder is available."
-    end
-
-    if imageMethod == "Native" and not imageAssetId then
-        return nil, assetIdError or "Native image loading is unavailable."
+    if not imageAssetId then
+        return nil, assetIdError or "Could not create a local image asset reference."
     end
 
     local imageAsset = {
         Url = downloadedAsset.Url,
         ImageId = imageAssetId,
+        ImageID = imageAssetId,
+        Imageid = imageAssetId,
         FilePath = downloadedAsset.FilePath,
         Format = downloadedAsset.Extension,
         Size = downloadedAsset.Size,
         Cached = downloadedAsset.Cached,
-        Method = imageAssetId and "Native" or "ImageBuilder",
-        DecodedImage = decodedImageData,
-        Options = imageOptions,
-        Renderer = nil
+        Method = "Native"
     }
 
-    imageAsset.ImageID = imageAsset.ImageId
-    imageAsset.Imageid = imageAsset.ImageId
-
-    function imageAsset:Apply(targetImageObject, applyOptions)
-        applyOptions = applyOptions or {}
-
+    function imageAsset:Apply(targetImageObject)
         if typeof(targetImageObject) ~= "Instance" then
             return false, "Apply() requires a Roblox Instance."
         end
 
-        local useImageBuilder = applyOptions.Method == "ImageBuilder" or self.Method == "ImageBuilder"
-
-        if not useImageBuilder and self.ImageId then
-            if targetImageObject:IsA("Decal") or targetImageObject:IsA("Texture") then
-                targetImageObject.Texture = self.ImageId
-                return true
-            end
-
-            if targetImageObject:IsA("ImageLabel") or targetImageObject:IsA("ImageButton") then
-                targetImageObject.Image = self.ImageId
-                return true
-            end
-
-            return false, "Native images can be applied to Decal, Texture, ImageLabel or ImageButton instances."
+        if targetImageObject:IsA("Decal") or targetImageObject:IsA("Texture") then
+            targetImageObject.Texture = self.ImageId
+            return true
         end
 
         if targetImageObject:IsA("ImageLabel") or targetImageObject:IsA("ImageButton") then
-            if not self.DecodedImage then
-                return false, "No decoded pixel data is available for ImageBuilder."
-            end
-
-            if self.Renderer then
-                self.Renderer:Destroy()
-            end
-
-            local renderOptions = table.clone(self.Options or {})
-            for optionName, optionValue in pairs(applyOptions) do
-                renderOptions[optionName] = optionValue
-            end
-
-            local renderer, renderError = AssetBridge.ImageBuilder.Render(targetImageObject, self.DecodedImage, renderOptions)
-            if not renderer then
-                return false, renderError
-            end
-
-            self.Renderer = renderer
-            return true, renderer
+            targetImageObject.Image = self.ImageId
+            return true
         end
 
-        return false, "ImageBuilder fallback supports ImageLabel and ImageButton. Decal and Texture require a native ImageId."
+        return false, "Images can be applied to Decal, Texture, ImageLabel or ImageButton instances."
     end
 
     function imageAsset:CreateLabel(parentInstance, labelProperties)
+        if typeof(parentInstance) ~= "Instance" then
+            return nil, "CreateLabel() requires a parent Instance."
+        end
+
         labelProperties = labelProperties or {}
         local imageLabel = assetBridgeInstanceNew("ImageLabel")
         imageLabel.Name = labelProperties.Name or "AssetBridgeImage"
@@ -733,30 +476,23 @@ local function assetBridgeCreateImageAsset(downloadedAsset, imageOptions)
         imageLabel.Size = labelProperties.Size or UDim2.new(1, 0, 1, 0)
         imageLabel.Position = labelProperties.Position or UDim2.new(0, 0, 0, 0)
         imageLabel.ScaleType = labelProperties.ScaleType or Enum.ScaleType.Fit
-        imageLabel.Parent = parentInstance
 
         for propertyName, propertyValue in pairs(labelProperties) do
             if propertyName ~= "Name" and propertyName ~= "Parent" then
-                pcall(function()
+                local propertySuccess, propertyError = pcall(function()
                     imageLabel[propertyName] = propertyValue
                 end)
+
+                if not propertySuccess then
+                    imageLabel:Destroy()
+                    return nil, "Invalid ImageLabel property " .. tostring(propertyName) .. ": " .. tostring(propertyError)
+                end
             end
         end
 
-        local applySuccess, applyResult = self:Apply(imageLabel)
-        if not applySuccess then
-            imageLabel:Destroy()
-            return nil, applyResult
-        end
-
+        imageLabel.Parent = parentInstance
+        imageLabel.Image = self.ImageId
         return imageLabel
-    end
-
-    function imageAsset:Destroy()
-        if self.Renderer then
-            self.Renderer:Destroy()
-            self.Renderer = nil
-        end
     end
 
     return imageAsset
@@ -770,7 +506,7 @@ function AssetBridge.Image.Fetch(imageUrl, imageOptions)
         return nil, downloadError
     end
 
-    return assetBridgeCreateImageAsset(downloadedImage, imageOptions)
+    return assetBridgeCreateImageAsset(downloadedImage)
 end
 
 local assetBridgeSoundEffectClasses = {
