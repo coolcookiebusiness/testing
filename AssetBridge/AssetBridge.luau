@@ -6,7 +6,6 @@ local AssetBridge = {
         MaxBytes = 52428800,
         GIFMaxFrames = 120,
         GIFMaxPixels = 1048576,
-        GIFMaxTotalPixels = 99999999999999999999999999999999999999999999999999999999999999,
         GIFMaxOutputBytes = 40000000,
         GIFMinFrameDelay = 0.02
     },
@@ -883,7 +882,6 @@ local function assetBridgeGifDecode(gifBytes, gifOptions)
 
     local maximumGifPixels = tonumber(gifOptions.MaxPixels) or tonumber(AssetBridge.Config.GIFMaxPixels) or 1048576
     local maximumGifFrames = tonumber(gifOptions.MaxFrames) or tonumber(AssetBridge.Config.GIFMaxFrames) or 120
-    local maximumGifTotalPixels = tonumber(gifOptions.MaxTotalPixels) or tonumber(AssetBridge.Config.GIFMaxTotalPixels) or 10000000
     local maximumGifOutputBytes = tonumber(gifOptions.MaxOutputBytes) or tonumber(AssetBridge.Config.GIFMaxOutputBytes) or 40000000
 
     local logicalScreenPixels = gifCanvasWidth * gifCanvasHeight
@@ -1046,9 +1044,6 @@ local function assetBridgeGifDecode(gifBytes, gifOptions)
 
             gifTotalPixels = gifTotalPixels + logicalScreenPixels
 
-            if gifTotalPixels > maximumGifTotalPixels then
-                return nil, "GIF exceeds the configured GIFMaxTotalPixels decoding limit."
-            end
 
             local localColorTable = nil
             if bit32.band(imagePacked, 128) ~= 0 then
@@ -1249,7 +1244,6 @@ local function assetBridgeGifScanFrames(gifBytes, gifOptions)
     local logicalScreenPixels = gifCanvasWidth * gifCanvasHeight
     local maximumGifPixels = tonumber(gifOptions.MaxPixels) or tonumber(AssetBridge.Config.GIFMaxPixels) or 1048576
     local maximumGifFrames = tonumber(gifOptions.MaxFrames) or tonumber(AssetBridge.Config.GIFMaxFrames) or 120
-    local maximumGifTotalPixels = tonumber(gifOptions.MaxTotalPixels) or tonumber(AssetBridge.Config.GIFMaxTotalPixels) or 10000000
 
     if logicalScreenPixels > maximumGifPixels then
         return nil, "GIF dimensions exceed the configured GIFMaxPixels limit."
@@ -1373,9 +1367,6 @@ local function assetBridgeGifScanFrames(gifBytes, gifOptions)
             end
 
             gifTotalPixels = gifTotalPixels + logicalScreenPixels
-            if gifTotalPixels > maximumGifTotalPixels then
-                return nil, "GIF exceeds the configured GIFMaxTotalPixels decoding limit."
-            end
 
             local localColorTable = nil
             if bit32.band(imagePacked, 128) ~= 0 then
@@ -1457,7 +1448,7 @@ local function assetBridgeGifScanFrames(gifBytes, gifOptions)
     }
 end
 
-local function assetBridgeGifIncrementalDecodeFrame(gifDecoder)
+local function assetBridgeGifIncrementalDecodeFrame(gifDecoder, preparedFramePixels)
     if gifDecoder._destroyed then
         return nil, "This GIF decoder has been destroyed."
     end
@@ -1493,14 +1484,18 @@ local function assetBridgeGifIncrementalDecodeFrame(gifDecoder)
 
     local framePixelCount = frameMetadata.Width * frameMetadata.Height
     local decodeStartedAt = os.clock()
-    local decodedFramePixels, frameDecodeError = assetBridgeGifDecodeLZW(
-        frameMetadata.CompressedData,
-        frameMetadata.LzwMinimumCodeSize,
-        framePixelCount,
-        gifDecoder._yieldEveryCodes
-    )
+    local decodedFramePixels = preparedFramePixels
     if not decodedFramePixels then
-        return nil, frameDecodeError
+        local frameDecodeError
+        decodedFramePixels, frameDecodeError = assetBridgeGifDecodeLZW(
+            frameMetadata.CompressedData,
+            frameMetadata.LzwMinimumCodeSize,
+            framePixelCount,
+            gifDecoder._yieldEveryCodes
+        )
+        if not decodedFramePixels then
+            return nil, frameDecodeError
+        end
     end
 
     local restoreCanvas = assetBridgeGifCloneCanvas(canvasRows, gifDecoder.Height)
@@ -1644,6 +1639,85 @@ end
 
 function assetBridgeGifDecoderMethods:DecodeNextFrame()
     return assetBridgeGifIncrementalDecodeFrame(self)
+end
+
+function assetBridgeGifDecoderMethods:DecodeNextFramesParallel(frameCount, onFrameDecoded, onDecodeProgress)
+    if self._destroyed then
+        return nil, "This GIF decoder has been destroyed."
+    end
+
+    frameCount = math.max(1, math.floor(tonumber(frameCount) or 1))
+    local firstFrameIndex = self.DecodedFrameCount + 1
+    local batchCount = math.min(frameCount, self.FrameCount - self.DecodedFrameCount)
+    if batchCount <= 0 then
+        return nil, "All GIF frames have already been decoded."
+    end
+
+    local preparedFrames = {}
+    local completedWorkers = 0
+
+    for batchOffset = 1, batchCount do
+        local workerOffset = batchOffset
+        local frameIndex = firstFrameIndex + workerOffset - 1
+        local frameMetadata = self.Frames[frameIndex]
+
+        task.spawn(function()
+            local decodedPixels, decodeError = assetBridgeGifDecodeLZW(
+                frameMetadata.CompressedData,
+                frameMetadata.LzwMinimumCodeSize,
+                frameMetadata.Width * frameMetadata.Height,
+                self._yieldEveryCodes
+            )
+
+            preparedFrames[workerOffset] = {
+                Pixels = decodedPixels,
+                Error = decodeError,
+                FrameIndex = frameIndex
+            }
+            completedWorkers = completedWorkers + 1
+
+            if type(onDecodeProgress) == "function" then
+                pcall(onDecodeProgress, completedWorkers, batchCount, frameIndex, decodedPixels ~= nil, decodeError)
+            end
+        end)
+    end
+
+    while completedWorkers < batchCount do
+        if self._destroyed then
+            return nil, "This GIF decoder was destroyed while frames were decoding."
+        end
+        task.wait()
+    end
+
+    for batchOffset = 1, batchCount do
+        local preparedFrame = preparedFrames[batchOffset]
+        if not preparedFrame or not preparedFrame.Pixels then
+            return nil, string.format(
+                "Frame %d failed during parallel LZW decoding: %s",
+                firstFrameIndex + batchOffset - 1,
+                tostring(preparedFrame and preparedFrame.Error or "Unknown decoder error")
+            )
+        end
+    end
+
+    local decodedFrames = {}
+    for batchOffset = 1, batchCount do
+        if self._destroyed then
+            return nil, "This GIF decoder was destroyed while frames were being composed."
+        end
+
+        local decodedFrame, frameError = assetBridgeGifIncrementalDecodeFrame(self, preparedFrames[batchOffset].Pixels)
+        if not decodedFrame then
+            return nil, string.format("Frame %d failed during composition: %s", firstFrameIndex + batchOffset - 1, tostring(frameError))
+        end
+
+        decodedFrames[#decodedFrames + 1] = decodedFrame
+        if type(onFrameDecoded) == "function" then
+            pcall(onFrameDecoded, decodedFrame, batchOffset, batchCount)
+        end
+    end
+
+    return decodedFrames
 end
 
 function assetBridgeGifDecoderMethods:GetDecodedFrame(frameIndex)
