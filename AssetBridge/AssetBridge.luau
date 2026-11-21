@@ -1,6 +1,6 @@
 local AssetBridge = {
     Name = "AssetBridge",
-    Version = "0.2.1",
+    Version = "0.2.2",
     Config = {
         Cache = true,
         MaxBytes = 52428800,
@@ -1662,12 +1662,18 @@ function assetBridgeGifDecoderMethods:DecodeNextFramesParallel(frameCount, onFra
         local frameMetadata = self.Frames[frameIndex]
 
         task.spawn(function()
-            local decodedPixels, decodeError = assetBridgeGifDecodeLZW(
+            local decodeCallSuccess, decodedPixels, decodeError = pcall(
+                assetBridgeGifDecodeLZW,
                 frameMetadata.CompressedData,
                 frameMetadata.LzwMinimumCodeSize,
                 frameMetadata.Width * frameMetadata.Height,
                 self._yieldEveryCodes
             )
+
+            if not decodeCallSuccess then
+                decodeError = decodedPixels
+                decodedPixels = nil
+            end
 
             preparedFrames[workerOffset] = {
                 Pixels = decodedPixels,
@@ -1706,7 +1712,10 @@ function assetBridgeGifDecoderMethods:DecodeNextFramesParallel(frameCount, onFra
             return nil, "This GIF decoder was destroyed while frames were being composed."
         end
 
-        local decodedFrame, frameError = assetBridgeGifIncrementalDecodeFrame(self, preparedFrames[batchOffset].Pixels)
+        local preparedFramePixels = preparedFrames[batchOffset].Pixels
+        preparedFrames[batchOffset].Pixels = nil
+        local decodedFrame, frameError = assetBridgeGifIncrementalDecodeFrame(self, preparedFramePixels)
+        preparedFramePixels = nil
         if not decodedFrame then
             return nil, string.format("Frame %d failed during composition: %s", firstFrameIndex + batchOffset - 1, tostring(frameError))
         end
@@ -2049,19 +2058,24 @@ local function assetBridgeCreateGifAnimation(gifDownload, gifDecoded, gifOptions
     end
 
     for gifFrameIndex, decodedFrame in ipairs(gifDecoded.Frames) do
-        local frameFilePath = "AssetBridge_GIF_" .. gifAnimationHash .. "_Frame_" .. string.format("%04d", gifFrameIndex) .. ".png"
-        local frameAlreadyCached = assetBridgeFileExists(frameFilePath) and not gifOptions.Refresh
+        local frameFilePath = decodedFrame.FilePath or ("AssetBridge_GIF_" .. gifAnimationHash .. "_Frame_" .. string.format("%04d", gifFrameIndex) .. ".png")
+        local frameImageId = decodedFrame.ImageId
 
-        if not frameAlreadyCached then
-            local frameWriteSuccess, frameWriteError = pcall(assetBridgeWriteFileFunction, frameFilePath, decodedFrame.Bytes)
-            if not frameWriteSuccess then
-                return nil, "Could not write decoded GIF frame " .. tostring(gifFrameIndex) .. ": " .. tostring(frameWriteError)
-            end
-        end
-
-        local frameImageId, frameAssetError = assetBridgeGetCustomAssetId(frameFilePath)
         if not frameImageId then
-            return nil, "Could not create local asset for GIF frame " .. tostring(gifFrameIndex) .. ": " .. tostring(frameAssetError)
+            local frameAlreadyCached = assetBridgeFileExists(frameFilePath) and not gifOptions.Refresh
+
+            if not frameAlreadyCached then
+                local frameWriteSuccess, frameWriteError = pcall(assetBridgeWriteFileFunction, frameFilePath, decodedFrame.Bytes)
+                if not frameWriteSuccess then
+                    return nil, "Could not write decoded GIF frame " .. tostring(gifFrameIndex) .. ": " .. tostring(frameWriteError)
+                end
+            end
+
+            local frameAssetError
+            frameImageId, frameAssetError = assetBridgeGetCustomAssetId(frameFilePath)
+            if not frameImageId then
+                return nil, "Could not create local asset for GIF frame " .. tostring(gifFrameIndex) .. ": " .. tostring(frameAssetError)
+            end
         end
 
         gifAnimationFrames[gifFrameIndex] = {
@@ -2069,7 +2083,8 @@ local function assetBridgeCreateGifAnimation(gifDownload, gifDecoded, gifOptions
             ImageId = frameImageId,
             FilePath = frameFilePath,
             Duration = decodedFrame.Duration,
-            Size = #decodedFrame.Bytes
+            Size = decodedFrame.Size or (decodedFrame.Bytes and #decodedFrame.Bytes or 0),
+            CompressedSize = decodedFrame.CompressedSize or 0
         }
     end
 
@@ -2214,54 +2229,38 @@ AssetBridge.GIF.OpenIncremental = AssetBridge.GIF.Open
 function AssetBridge.GIF.Fetch(gifUrl, gifOptions)
     gifOptions = gifOptions or {}
 
-    if gifOptions.PerFrame == true then
-        return AssetBridge.GIF.Open(gifUrl, gifOptions)
+    local gifDecoder, gifOpenError = AssetBridge.GIF.Open(gifUrl, gifOptions)
+    if not gifDecoder then
+        return nil, gifOpenError
     end
 
-    local downloadedGif, gifDownloadError = assetBridgeDownload(gifUrl, "Image", gifOptions)
-    if not downloadedGif then
-        return nil, gifDownloadError
+    local decodedFrames, parallelDecodeError = gifDecoder:DecodeNextFramesParallel(gifDecoder.FrameCount)
+    if not decodedFrames then
+        gifDecoder:Destroy()
+        return nil, parallelDecodeError
     end
 
-    if downloadedGif.Extension ~= "gif" then
-        return nil, "The supplied URL did not return a GIF image. Detected format: " .. tostring(downloadedGif.Extension)
-    end
+    local decodedAnimationData = {
+        Width = gifDecoder.Width,
+        Height = gifDecoder.Height,
+        Frames = decodedFrames,
+        FrameCount = gifDecoder.FrameCount,
+        Duration = gifDecoder.Duration,
+        LoopExtensionFound = gifDecoder.LoopExtensionFound,
+        LoopCount = gifDecoder.LoopCount,
+        TotalPixels = gifDecoder.TotalPixels,
+        TotalOutputBytes = gifDecoder.TotalOutputBytes,
+        Cached = gifDecoder.Cached
+    }
 
-    local gifBytes = downloadedGif.Bytes
-    if not gifBytes and type(assetBridgeReadFileFunction) == "function" then
-        local readGifSuccess, readGifBytes = pcall(assetBridgeReadFileFunction, downloadedGif.FilePath)
-        if readGifSuccess and type(readGifBytes) == "string" then
-            gifBytes = readGifBytes
-        end
-    end
+    local gifAnimation, animationError = assetBridgeCreateGifAnimation(
+        {Url = gifDecoder.Url, Cached = gifDecoder.Cached},
+        decodedAnimationData,
+        gifOptions
+    )
 
-    if type(gifBytes) ~= "string" then
-        local forcedDownloadOptions = {}
-        for optionName, optionValue in pairs(gifOptions) do
-            forcedDownloadOptions[optionName] = optionValue
-        end
-        forcedDownloadOptions.Refresh = true
-        forcedDownloadOptions.Cache = false
-
-        local freshGifDownload, freshGifDownloadError = assetBridgeDownload(gifUrl, "Image", forcedDownloadOptions)
-        if not freshGifDownload then
-            return nil, freshGifDownloadError
-        end
-
-        downloadedGif = freshGifDownload
-        gifBytes = freshGifDownload.Bytes
-    end
-
-    if type(gifBytes) ~= "string" then
-        return nil, "The GIF response was unavailable as binary data. This executor needs a binary-capable HTTP request function."
-    end
-
-    local decodedGif, gifDecodeError = assetBridgeGifDecode(gifBytes, gifOptions)
-    if not decodedGif then
-        return nil, gifDecodeError
-    end
-
-    return assetBridgeCreateGifAnimation(downloadedGif, decodedGif, gifOptions)
+    gifDecoder:Destroy()
+    return gifAnimation, animationError
 end
 
 local assetBridgeSoundEffectClasses = {
