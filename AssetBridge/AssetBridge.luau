@@ -6,7 +6,7 @@ local AssetBridge = {
         MaxBytes = 52428800,
         GIFMaxFrames = 120,
         GIFMaxPixels = 1048576,
-        GIFMaxTotalPixels = 9999999999999999,
+        GIFMaxTotalPixels = 99999999999999999999999999999999999999999999999999999999999999,
         GIFMaxOutputBytes = 40000000,
         GIFMinFrameDelay = 0.02
     },
