@@ -1,11 +1,16 @@
 local AssetBridge = {
     Name = "AssetBridge",
-    Version = "0.2.3",
+    Version = "0.2.4",
     Config = {
         Cache = true,
+        CacheDirectory = "abysall/AssetBridge",
+        ImageCacheDirectory = "abysall/AssetBridge/images",
+        AudioCacheDirectory = "abysall/AssetBridge/audio",
+        GIFCacheDirectory = "abysall/AssetBridge/gif",
         MaxBytes = 52428800,
         GIFMaxFrames = 120,
         GIFMaxPixels = 1048576,
+        GIFMaxTotalPixels = 10000000,
         GIFMaxOutputBytes = 40000000,
         GIFMinFrameDelay = 0.02
     },
@@ -288,8 +293,59 @@ local function assetBridgePerformHttpRequest(assetBridgeUrl, assetBridgeOptions)
     return nil, "No compatible HTTP request function succeeded."
 end
 
+local function assetBridgeGetCacheDirectory(assetBridgeExtension)
+    if assetBridgeAudioExtensions[assetBridgeExtension] then
+        return AssetBridge.Config.AudioCacheDirectory or ((AssetBridge.Config.CacheDirectory or "abysall/AssetBridge") .. "/audio")
+    end
+
+    if assetBridgeExtension == "gif" then
+        return AssetBridge.Config.GIFCacheDirectory or ((AssetBridge.Config.CacheDirectory or "abysall/AssetBridge") .. "/gif")
+    end
+
+    return AssetBridge.Config.ImageCacheDirectory or ((AssetBridge.Config.CacheDirectory or "abysall/AssetBridge") .. "/images")
+end
+
+local function assetBridgeEnsureFolder(assetBridgeFolderPath)
+    if type(assetBridgeFolderPath) ~= "string" or assetBridgeFolderPath == "" then
+        return false, "A cache folder path is required."
+    end
+
+    local assetBridgeMakeFolderFunction = assetBridgeSafeGetGlobal("makefolder")
+    local assetBridgeIsFolderFunction = assetBridgeSafeGetGlobal("isfolder")
+    if type(assetBridgeMakeFolderFunction) ~= "function" then
+        return false, "This executor does not expose makefolder()."
+    end
+
+    local assetBridgeCurrentPath = ""
+    for assetBridgePathPart in string.gmatch(assetBridgeFolderPath, "[^/\\]+") do
+        assetBridgeCurrentPath = assetBridgeCurrentPath == "" and assetBridgePathPart or (assetBridgeCurrentPath .. "/" .. assetBridgePathPart)
+        local assetBridgeFolderExists = false
+
+        if type(assetBridgeIsFolderFunction) == "function" then
+            local assetBridgeFolderCheckSuccess, assetBridgeFolderCheckResult = pcall(assetBridgeIsFolderFunction, assetBridgeCurrentPath)
+            assetBridgeFolderExists = assetBridgeFolderCheckSuccess and assetBridgeFolderCheckResult == true
+        end
+
+        if not assetBridgeFolderExists then
+            local assetBridgeFolderCreateSuccess, assetBridgeFolderCreateError = pcall(assetBridgeMakeFolderFunction, assetBridgeCurrentPath)
+            if not assetBridgeFolderCreateSuccess then
+                if type(assetBridgeIsFolderFunction) ~= "function" then
+                    return false, "Could not create cache folder " .. assetBridgeCurrentPath .. ": " .. tostring(assetBridgeFolderCreateError)
+                end
+                local assetBridgeRecheckSuccess, assetBridgeRecheckResult = pcall(assetBridgeIsFolderFunction, assetBridgeCurrentPath)
+                if not assetBridgeRecheckSuccess or not assetBridgeRecheckResult then
+                    return false, "Could not create cache folder " .. assetBridgeCurrentPath .. ": " .. tostring(assetBridgeFolderCreateError)
+                end
+            end
+        end
+    end
+
+    return true
+end
+
 local function assetBridgeBuildCachePath(assetBridgeUrl, assetBridgeExtension)
-    return "AssetBridge_" .. assetBridgeHashString(assetBridgeUrl) .. "." .. assetBridgeExtension
+    local assetBridgeCacheDirectory = assetBridgeGetCacheDirectory(assetBridgeExtension)
+    return assetBridgeCacheDirectory .. "/AssetBridge_" .. assetBridgeHashString(assetBridgeUrl) .. "." .. assetBridgeExtension
 end
 
 local function assetBridgeFileExists(assetBridgePath)
@@ -299,6 +355,35 @@ local function assetBridgeFileExists(assetBridgePath)
 
     local assetBridgeSuccess, assetBridgeExists = pcall(assetBridgeIsFileFunction, assetBridgePath)
     return assetBridgeSuccess and assetBridgeExists == true
+end
+
+local function assetBridgeMigrateLegacyFile(legacyFilePath, newFilePath, destinationDirectory)
+    if not assetBridgeFileExists(legacyFilePath) or type(assetBridgeReadFileFunction) ~= "function"
+        or type(assetBridgeWriteFileFunction) ~= "function"
+    then
+        return false
+    end
+
+    local folderSuccess = assetBridgeEnsureFolder(destinationDirectory)
+    if not folderSuccess then
+        return false
+    end
+
+    local readSuccess, legacyBytes = pcall(assetBridgeReadFileFunction, legacyFilePath)
+    if not readSuccess or type(legacyBytes) ~= "string" then
+        return false
+    end
+
+    local writeSuccess = pcall(assetBridgeWriteFileFunction, newFilePath, legacyBytes)
+    if not writeSuccess then
+        return false
+    end
+
+    if type(assetBridgeDeleteFileFunction) == "function" then
+        pcall(assetBridgeDeleteFileFunction, legacyFilePath)
+    end
+
+    return true
 end
 
 local function assetBridgeGetCachedFile(assetBridgeUrl, assetBridgeExpectedType, assetBridgeOptions)
@@ -316,6 +401,15 @@ local function assetBridgeGetCachedFile(assetBridgeUrl, assetBridgeExpectedType,
     end
 
     local assetBridgeCachePath = assetBridgeBuildCachePath(assetBridgeUrl, assetBridgeKnownExtension)
+    local assetBridgeFolderSuccess = assetBridgeEnsureFolder(assetBridgeGetCacheDirectory(assetBridgeKnownExtension))
+    if not assetBridgeFolderSuccess then
+        return nil
+    end
+
+    if not assetBridgeFileExists(assetBridgeCachePath) then
+        local assetBridgeLegacyCachePath = "AssetBridge_" .. assetBridgeHashString(assetBridgeUrl) .. "." .. assetBridgeKnownExtension
+        assetBridgeMigrateLegacyFile(assetBridgeLegacyCachePath, assetBridgeCachePath, assetBridgeGetCacheDirectory(assetBridgeKnownExtension))
+    end
 
     if not assetBridgeFileExists(assetBridgeCachePath) then
         return nil
@@ -396,6 +490,10 @@ local function assetBridgeDownload(assetBridgeUrl, assetBridgeExpectedType, asse
     end
 
     local assetBridgeCachePath = assetBridgeBuildCachePath(assetBridgeNormalizedUrl, assetBridgeDetectedExtension)
+    local assetBridgeFolderSuccess, assetBridgeFolderError = assetBridgeEnsureFolder(assetBridgeGetCacheDirectory(assetBridgeDetectedExtension))
+    if not assetBridgeFolderSuccess then
+        return nil, "Could not prepare the AssetBridge cache directory: " .. tostring(assetBridgeFolderError)
+    end
     local assetBridgeWriteSuccess, assetBridgeWriteError = pcall(assetBridgeWriteFileFunction, assetBridgeCachePath, assetBridgeDownloadedBytes)
 
     if not assetBridgeWriteSuccess then
@@ -882,6 +980,7 @@ local function assetBridgeGifDecode(gifBytes, gifOptions)
 
     local maximumGifPixels = tonumber(gifOptions.MaxPixels) or tonumber(AssetBridge.Config.GIFMaxPixels) or 1048576
     local maximumGifFrames = tonumber(gifOptions.MaxFrames) or tonumber(AssetBridge.Config.GIFMaxFrames) or 120
+    local maximumGifTotalPixels = tonumber(gifOptions.MaxTotalPixels) or tonumber(AssetBridge.Config.GIFMaxTotalPixels) or 10000000
     local maximumGifOutputBytes = tonumber(gifOptions.MaxOutputBytes) or tonumber(AssetBridge.Config.GIFMaxOutputBytes) or 40000000
 
     local logicalScreenPixels = gifCanvasWidth * gifCanvasHeight
@@ -1044,6 +1143,9 @@ local function assetBridgeGifDecode(gifBytes, gifOptions)
 
             gifTotalPixels = gifTotalPixels + logicalScreenPixels
 
+            if gifTotalPixels > maximumGifTotalPixels then
+                return nil, "GIF exceeds the configured GIFMaxTotalPixels decoding limit."
+            end
 
             local localColorTable = nil
             if bit32.band(imagePacked, 128) ~= 0 then
@@ -1244,6 +1346,7 @@ local function assetBridgeGifScanFrames(gifBytes, gifOptions)
     local logicalScreenPixels = gifCanvasWidth * gifCanvasHeight
     local maximumGifPixels = tonumber(gifOptions.MaxPixels) or tonumber(AssetBridge.Config.GIFMaxPixels) or 1048576
     local maximumGifFrames = tonumber(gifOptions.MaxFrames) or tonumber(AssetBridge.Config.GIFMaxFrames) or 120
+    local maximumGifTotalPixels = tonumber(gifOptions.MaxTotalPixels) or tonumber(AssetBridge.Config.GIFMaxTotalPixels) or 10000000
 
     if logicalScreenPixels > maximumGifPixels then
         return nil, "GIF dimensions exceed the configured GIFMaxPixels limit."
@@ -1367,6 +1470,9 @@ local function assetBridgeGifScanFrames(gifBytes, gifOptions)
             end
 
             gifTotalPixels = gifTotalPixels + logicalScreenPixels
+            if gifTotalPixels > maximumGifTotalPixels then
+                return nil, "GIF exceeds the configured GIFMaxTotalPixels decoding limit."
+            end
 
             local localColorTable = nil
             if bit32.band(imagePacked, 128) ~= 0 then
@@ -1448,7 +1554,7 @@ local function assetBridgeGifScanFrames(gifBytes, gifOptions)
     }
 end
 
-local function assetBridgeGifIncrementalDecodeFrame(gifDecoder, preparedFramePixels)
+local function assetBridgeGifIncrementalDecodeFrame(gifDecoder)
     if gifDecoder._destroyed then
         return nil, "This GIF decoder has been destroyed."
     end
@@ -1484,18 +1590,14 @@ local function assetBridgeGifIncrementalDecodeFrame(gifDecoder, preparedFramePix
 
     local framePixelCount = frameMetadata.Width * frameMetadata.Height
     local decodeStartedAt = os.clock()
-    local decodedFramePixels = preparedFramePixels
+    local decodedFramePixels, frameDecodeError = assetBridgeGifDecodeLZW(
+        frameMetadata.CompressedData,
+        frameMetadata.LzwMinimumCodeSize,
+        framePixelCount,
+        gifDecoder._yieldEveryCodes
+    )
     if not decodedFramePixels then
-        local frameDecodeError
-        decodedFramePixels, frameDecodeError = assetBridgeGifDecodeLZW(
-            frameMetadata.CompressedData,
-            frameMetadata.LzwMinimumCodeSize,
-            framePixelCount,
-            gifDecoder._yieldEveryCodes
-        )
-        if not decodedFramePixels then
-            return nil, frameDecodeError
-        end
+        return nil, frameDecodeError
     end
 
     local restoreCanvas = assetBridgeGifCloneCanvas(canvasRows, gifDecoder.Height)
@@ -1584,7 +1686,16 @@ local function assetBridgeGifIncrementalDecodeFrame(gifDecoder, preparedFramePix
     end
 
     local animationHash = assetBridgeHashString(gifDecoder.Url)
-    local frameFilePath = "AssetBridge_GIF_" .. animationHash .. "_Frame_" .. string.format("%04d", nextFrameIndex) .. ".png"
+    local gifCacheDirectory = assetBridgeGetCacheDirectory("gif")
+    local gifFolderSuccess, gifFolderError = assetBridgeEnsureFolder(gifCacheDirectory)
+    if not gifFolderSuccess then
+        return nil, "Could not prepare the GIF cache directory: " .. tostring(gifFolderError)
+    end
+    local frameFileName = "AssetBridge_GIF_" .. animationHash .. "_Frame_" .. string.format("%04d", nextFrameIndex) .. ".png"
+    local frameFilePath = gifCacheDirectory .. "/" .. frameFileName
+    if not assetBridgeFileExists(frameFilePath) then
+        assetBridgeMigrateLegacyFile(frameFileName, frameFilePath, gifCacheDirectory)
+    end
     local useExistingFile = not gifDecoder._refresh and assetBridgeFileExists(frameFilePath)
 
     if not useExistingFile then
@@ -1639,94 +1750,6 @@ end
 
 function assetBridgeGifDecoderMethods:DecodeNextFrame()
     return assetBridgeGifIncrementalDecodeFrame(self)
-end
-
-function assetBridgeGifDecoderMethods:DecodeNextFramesParallel(frameCount, onFrameDecoded, onDecodeProgress)
-    if self._destroyed then
-        return nil, "This GIF decoder has been destroyed."
-    end
-
-    frameCount = math.max(1, math.floor(tonumber(frameCount) or 1))
-    local firstFrameIndex = self.DecodedFrameCount + 1
-    local batchCount = math.min(frameCount, self.FrameCount - self.DecodedFrameCount)
-    if batchCount <= 0 then
-        return nil, "All GIF frames have already been decoded."
-    end
-
-    local preparedFrames = {}
-    local completedWorkers = 0
-
-    for batchOffset = 1, batchCount do
-        local workerOffset = batchOffset
-        local frameIndex = firstFrameIndex + workerOffset - 1
-        local frameMetadata = self.Frames[frameIndex]
-
-        task.spawn(function()
-            local decodeCallSuccess, decodedPixels, decodeError = pcall(
-                assetBridgeGifDecodeLZW,
-                frameMetadata.CompressedData,
-                frameMetadata.LzwMinimumCodeSize,
-                frameMetadata.Width * frameMetadata.Height,
-                self._yieldEveryCodes
-            )
-
-            if not decodeCallSuccess then
-                decodeError = decodedPixels
-                decodedPixels = nil
-            end
-
-            preparedFrames[workerOffset] = {
-                Pixels = decodedPixels,
-                Error = decodeError,
-                FrameIndex = frameIndex
-            }
-            completedWorkers = completedWorkers + 1
-
-            if type(onDecodeProgress) == "function" then
-                pcall(onDecodeProgress, completedWorkers, batchCount, frameIndex, decodedPixels ~= nil, decodeError)
-            end
-        end)
-    end
-
-    while completedWorkers < batchCount do
-        if self._destroyed then
-            return nil, "This GIF decoder was destroyed while frames were decoding."
-        end
-        task.wait()
-    end
-
-    for batchOffset = 1, batchCount do
-        local preparedFrame = preparedFrames[batchOffset]
-        if not preparedFrame or not preparedFrame.Pixels then
-            return nil, string.format(
-                "Frame %d failed during parallel LZW decoding: %s",
-                firstFrameIndex + batchOffset - 1,
-                tostring(preparedFrame and preparedFrame.Error or "Unknown decoder error")
-            )
-        end
-    end
-
-    local decodedFrames = {}
-    for batchOffset = 1, batchCount do
-        if self._destroyed then
-            return nil, "This GIF decoder was destroyed while frames were being composed."
-        end
-
-        local preparedFramePixels = preparedFrames[batchOffset].Pixels
-        preparedFrames[batchOffset].Pixels = nil
-        local decodedFrame, frameError = assetBridgeGifIncrementalDecodeFrame(self, preparedFramePixels)
-        preparedFramePixels = nil
-        if not decodedFrame then
-            return nil, string.format("Frame %d failed during composition: %s", firstFrameIndex + batchOffset - 1, tostring(frameError))
-        end
-
-        decodedFrames[#decodedFrames + 1] = decodedFrame
-        if type(onFrameDecoded) == "function" then
-            pcall(onFrameDecoded, decodedFrame, batchOffset, batchCount)
-        end
-    end
-
-    return decodedFrames
 end
 
 function assetBridgeGifDecoderMethods:GetDecodedFrame(frameIndex)
@@ -2057,25 +2080,30 @@ local function assetBridgeCreateGifAnimation(gifDownload, gifDecoded, gifOptions
         return nil, "GIF playback requires getcustomasset() or getsynasset()."
     end
 
+    local gifCacheDirectory = assetBridgeGetCacheDirectory("gif")
+    local gifFolderSuccess, gifFolderError = assetBridgeEnsureFolder(gifCacheDirectory)
+    if not gifFolderSuccess then
+        return nil, "Could not prepare the GIF cache directory: " .. tostring(gifFolderError)
+    end
+
     for gifFrameIndex, decodedFrame in ipairs(gifDecoded.Frames) do
-        local frameFilePath = decodedFrame.FilePath or ("AssetBridge_GIF_" .. gifAnimationHash .. "_Frame_" .. string.format("%04d", gifFrameIndex) .. ".png")
-        local frameImageId = decodedFrame.ImageId
+        local frameFileName = "AssetBridge_GIF_" .. gifAnimationHash .. "_Frame_" .. string.format("%04d", gifFrameIndex) .. ".png"
+        local frameFilePath = gifCacheDirectory .. "/" .. frameFileName
+        if not assetBridgeFileExists(frameFilePath) then
+            assetBridgeMigrateLegacyFile(frameFileName, frameFilePath, gifCacheDirectory)
+        end
+        local frameAlreadyCached = assetBridgeFileExists(frameFilePath) and not gifOptions.Refresh
 
+        if not frameAlreadyCached then
+            local frameWriteSuccess, frameWriteError = pcall(assetBridgeWriteFileFunction, frameFilePath, decodedFrame.Bytes)
+            if not frameWriteSuccess then
+                return nil, "Could not write decoded GIF frame " .. tostring(gifFrameIndex) .. ": " .. tostring(frameWriteError)
+            end
+        end
+
+        local frameImageId, frameAssetError = assetBridgeGetCustomAssetId(frameFilePath)
         if not frameImageId then
-            local frameAlreadyCached = assetBridgeFileExists(frameFilePath) and not gifOptions.Refresh
-
-            if not frameAlreadyCached then
-                local frameWriteSuccess, frameWriteError = pcall(assetBridgeWriteFileFunction, frameFilePath, decodedFrame.Bytes)
-                if not frameWriteSuccess then
-                    return nil, "Could not write decoded GIF frame " .. tostring(gifFrameIndex) .. ": " .. tostring(frameWriteError)
-                end
-            end
-
-            local frameAssetError
-            frameImageId, frameAssetError = assetBridgeGetCustomAssetId(frameFilePath)
-            if not frameImageId then
-                return nil, "Could not create local asset for GIF frame " .. tostring(gifFrameIndex) .. ": " .. tostring(frameAssetError)
-            end
+            return nil, "Could not create local asset for GIF frame " .. tostring(gifFrameIndex) .. ": " .. tostring(frameAssetError)
         end
 
         gifAnimationFrames[gifFrameIndex] = {
@@ -2083,8 +2111,7 @@ local function assetBridgeCreateGifAnimation(gifDownload, gifDecoded, gifOptions
             ImageId = frameImageId,
             FilePath = frameFilePath,
             Duration = decodedFrame.Duration,
-            Size = decodedFrame.Size or (decodedFrame.Bytes and #decodedFrame.Bytes or 0),
-            CompressedSize = decodedFrame.CompressedSize or 0
+            Size = #decodedFrame.Bytes
         }
     end
 
@@ -2229,38 +2256,54 @@ AssetBridge.GIF.OpenIncremental = AssetBridge.GIF.Open
 function AssetBridge.GIF.Fetch(gifUrl, gifOptions)
     gifOptions = gifOptions or {}
 
-    local gifDecoder, gifOpenError = AssetBridge.GIF.Open(gifUrl, gifOptions)
-    if not gifDecoder then
-        return nil, gifOpenError
+    if gifOptions.PerFrame == true then
+        return AssetBridge.GIF.Open(gifUrl, gifOptions)
     end
 
-    local decodedFrames, parallelDecodeError = gifDecoder:DecodeNextFramesParallel(gifDecoder.FrameCount)
-    if not decodedFrames then
-        gifDecoder:Destroy()
-        return nil, parallelDecodeError
+    local downloadedGif, gifDownloadError = assetBridgeDownload(gifUrl, "Image", gifOptions)
+    if not downloadedGif then
+        return nil, gifDownloadError
     end
 
-    local decodedAnimationData = {
-        Width = gifDecoder.Width,
-        Height = gifDecoder.Height,
-        Frames = decodedFrames,
-        FrameCount = gifDecoder.FrameCount,
-        Duration = gifDecoder.Duration,
-        LoopExtensionFound = gifDecoder.LoopExtensionFound,
-        LoopCount = gifDecoder.LoopCount,
-        TotalPixels = gifDecoder.TotalPixels,
-        TotalOutputBytes = gifDecoder.TotalOutputBytes,
-        Cached = gifDecoder.Cached
-    }
+    if downloadedGif.Extension ~= "gif" then
+        return nil, "The supplied URL did not return a GIF image. Detected format: " .. tostring(downloadedGif.Extension)
+    end
 
-    local gifAnimation, animationError = assetBridgeCreateGifAnimation(
-        {Url = gifDecoder.Url, Cached = gifDecoder.Cached},
-        decodedAnimationData,
-        gifOptions
-    )
+    local gifBytes = downloadedGif.Bytes
+    if not gifBytes and type(assetBridgeReadFileFunction) == "function" then
+        local readGifSuccess, readGifBytes = pcall(assetBridgeReadFileFunction, downloadedGif.FilePath)
+        if readGifSuccess and type(readGifBytes) == "string" then
+            gifBytes = readGifBytes
+        end
+    end
 
-    gifDecoder:Destroy()
-    return gifAnimation, animationError
+    if type(gifBytes) ~= "string" then
+        local forcedDownloadOptions = {}
+        for optionName, optionValue in pairs(gifOptions) do
+            forcedDownloadOptions[optionName] = optionValue
+        end
+        forcedDownloadOptions.Refresh = true
+        forcedDownloadOptions.Cache = false
+
+        local freshGifDownload, freshGifDownloadError = assetBridgeDownload(gifUrl, "Image", forcedDownloadOptions)
+        if not freshGifDownload then
+            return nil, freshGifDownloadError
+        end
+
+        downloadedGif = freshGifDownload
+        gifBytes = freshGifDownload.Bytes
+    end
+
+    if type(gifBytes) ~= "string" then
+        return nil, "The GIF response was unavailable as binary data. This executor needs a binary-capable HTTP request function."
+    end
+
+    local decodedGif, gifDecodeError = assetBridgeGifDecode(gifBytes, gifOptions)
+    if not decodedGif then
+        return nil, gifDecodeError
+    end
+
+    return assetBridgeCreateGifAnimation(downloadedGif, decodedGif, gifOptions)
 end
 
 local assetBridgeSoundEffectClasses = {
@@ -2476,548 +2519,6 @@ local function assetBridgeCreateSoundWrapper(soundInstance)
     }, assetBridgeSoundMetatable)
 end
 
-local function assetBridgeAudioReadUInt24BE(audioBytes, audioPosition)
-    local audioByteOne, audioByteTwo, audioByteThree = string.byte(audioBytes, audioPosition, audioPosition + 2)
-    if not audioByteThree then
-        return nil
-    end
-    return audioByteOne * 65536 + audioByteTwo * 256 + audioByteThree
-end
-
-local function assetBridgeAudioReadUInt32BE(audioBytes, audioPosition)
-    local audioByteOne, audioByteTwo, audioByteThree, audioByteFour = string.byte(audioBytes, audioPosition, audioPosition + 3)
-    if not audioByteFour then
-        return nil
-    end
-    return audioByteOne * 16777216 + audioByteTwo * 65536 + audioByteThree * 256 + audioByteFour
-end
-
-local function assetBridgeAudioReadSynchsafeUInt32(audioBytes, audioPosition)
-    local audioByteOne, audioByteTwo, audioByteThree, audioByteFour = string.byte(audioBytes, audioPosition, audioPosition + 3)
-    if not audioByteFour then
-        return nil
-    end
-    return (audioByteOne % 128) * 2097152
-        + (audioByteTwo % 128) * 16384
-        + (audioByteThree % 128) * 128
-        + (audioByteFour % 128)
-end
-
-local function assetBridgeAudioReadUInt32LE(audioBytes, audioPosition)
-    local audioByteOne, audioByteTwo, audioByteThree, audioByteFour = string.byte(audioBytes, audioPosition, audioPosition + 3)
-    if not audioByteFour then
-        return nil
-    end
-    return audioByteOne + audioByteTwo * 256 + audioByteThree * 65536 + audioByteFour * 16777216
-end
-
-local function assetBridgeAudioFindTextTerminator(audioBytes, audioPosition, audioEncoding)
-    if audioEncoding == 1 or audioEncoding == 2 then
-        local audioSearchPosition = audioPosition
-        while audioSearchPosition + 1 <= #audioBytes do
-            if string.byte(audioBytes, audioSearchPosition) == 0 and string.byte(audioBytes, audioSearchPosition + 1) == 0 then
-                return audioSearchPosition
-            end
-            audioSearchPosition = audioSearchPosition + 2
-        end
-        return nil
-    end
-
-    return string.find(audioBytes, "\0", audioPosition, true)
-end
-
-local function assetBridgeAudioParseId3Picture(audioBytes)
-    if string.sub(audioBytes, 1, 3) ~= "ID3" then
-        return nil, "The audio file does not contain an ID3 tag."
-    end
-
-    local audioMajorVersion = string.byte(audioBytes, 4)
-    local audioTagFlags = string.byte(audioBytes, 6) or 0
-    local audioTagSize = assetBridgeAudioReadSynchsafeUInt32(audioBytes, 7)
-
-    if not audioMajorVersion or not audioTagSize or audioMajorVersion < 2 or audioMajorVersion > 4 then
-        return nil, "The ID3 tag version or size is not supported."
-    end
-
-    local audioTagEnd = math.min(#audioBytes, 10 + audioTagSize)
-    local audioFramePosition = 11
-
-    if audioMajorVersion == 3 and audioTagFlags % 128 >= 64 then
-        local audioExtendedHeaderSize = assetBridgeAudioReadUInt32BE(audioBytes, audioFramePosition)
-        if not audioExtendedHeaderSize then
-            return nil, "The ID3 extended header is incomplete."
-        end
-        audioFramePosition = audioFramePosition + 4 + audioExtendedHeaderSize
-    elseif audioMajorVersion == 4 and audioTagFlags % 128 >= 64 then
-        local audioExtendedHeaderSize = assetBridgeAudioReadSynchsafeUInt32(audioBytes, audioFramePosition)
-        if not audioExtendedHeaderSize or audioExtendedHeaderSize < 4 then
-            return nil, "The ID3 extended header is invalid."
-        end
-        audioFramePosition = audioFramePosition + audioExtendedHeaderSize
-    end
-
-    while audioFramePosition <= audioTagEnd do
-        local audioFrameHeaderSize = audioMajorVersion == 2 and 6 or 10
-        if audioFramePosition + audioFrameHeaderSize - 1 > audioTagEnd then
-            break
-        end
-
-        local audioFrameId = string.sub(audioBytes, audioFramePosition, audioFramePosition + (audioMajorVersion == 2 and 2 or 3))
-        if audioFrameId == "\0\0\0" or audioFrameId == "\0\0\0\0" or audioFrameId == "" then
-            break
-        end
-
-        local audioFrameSize
-        local audioFrameDataPosition
-        if audioMajorVersion == 2 then
-            audioFrameSize = assetBridgeAudioReadUInt24BE(audioBytes, audioFramePosition + 3)
-            audioFrameDataPosition = audioFramePosition + 6
-        elseif audioMajorVersion == 4 then
-            audioFrameSize = assetBridgeAudioReadSynchsafeUInt32(audioBytes, audioFramePosition + 4)
-            audioFrameDataPosition = audioFramePosition + 10
-        else
-            audioFrameSize = assetBridgeAudioReadUInt32BE(audioBytes, audioFramePosition + 4)
-            audioFrameDataPosition = audioFramePosition + 10
-        end
-
-        if not audioFrameSize or audioFrameSize <= 0 or audioFrameDataPosition + audioFrameSize - 1 > audioTagEnd then
-            break
-        end
-
-        if audioFrameId == "APIC" or audioFrameId == "PIC" then
-            local audioEncoding = string.byte(audioBytes, audioFrameDataPosition)
-            if not audioEncoding then
-                return nil, "The ID3 artwork frame is incomplete."
-            end
-
-            local audioMimeType
-            local audioPictureTypePosition
-
-            if audioFrameId == "PIC" then
-                local audioPictureFormat = string.upper(string.sub(audioBytes, audioFrameDataPosition + 1, audioFrameDataPosition + 3))
-                audioMimeType = audioPictureFormat == "PNG" and "image/png" or audioPictureFormat == "GIF" and "image/gif" or "image/jpeg"
-                audioPictureTypePosition = audioFrameDataPosition + 4
-            else
-                local audioMimeStart = audioFrameDataPosition + 1
-                local audioMimeEnd = string.find(audioBytes, "\0", audioMimeStart, true)
-                if not audioMimeEnd then
-                    return nil, "The ID3 artwork MIME type is incomplete."
-                end
-                audioMimeType = string.sub(audioBytes, audioMimeStart, audioMimeEnd - 1)
-                audioPictureTypePosition = audioMimeEnd + 1
-            end
-
-            local audioDescriptionStart = audioPictureTypePosition + 1
-            local audioDescriptionEnd = assetBridgeAudioFindTextTerminator(audioBytes, audioDescriptionStart, audioEncoding)
-            if not audioDescriptionEnd then
-                return nil, "The ID3 artwork description is incomplete."
-            end
-
-            local audioArtworkStart
-            if audioEncoding == 1 or audioEncoding == 2 then
-                audioArtworkStart = audioDescriptionEnd + 2
-            else
-                audioArtworkStart = audioDescriptionEnd + 1
-            end
-
-            local audioFrameEnd = audioFrameDataPosition + audioFrameSize - 1
-            if audioArtworkStart <= audioFrameEnd then
-                return string.sub(audioBytes, audioArtworkStart, audioFrameEnd), audioMimeType
-            end
-
-            return nil, "The ID3 artwork frame does not contain image data."
-        end
-
-        audioFramePosition = audioFrameDataPosition + audioFrameSize
-    end
-
-    return nil, "No embedded ID3 artwork was found."
-end
-
-local function assetBridgeAudioParseFlacPictureBlock(audioBytes, audioBlockStart, audioBlockEnd)
-    local audioPosition = audioBlockStart
-    local audioPictureType = assetBridgeAudioReadUInt32BE(audioBytes, audioPosition)
-    if not audioPictureType then
-        return nil
-    end
-    audioPosition = audioPosition + 4
-
-    local audioMimeLength = assetBridgeAudioReadUInt32BE(audioBytes, audioPosition)
-    if not audioMimeLength or audioMimeLength > audioBlockEnd - audioPosition then
-        return nil
-    end
-    audioPosition = audioPosition + 4
-    local audioMimeType = string.sub(audioBytes, audioPosition, audioPosition + audioMimeLength - 1)
-    audioPosition = audioPosition + audioMimeLength
-
-    local audioDescriptionLength = assetBridgeAudioReadUInt32BE(audioBytes, audioPosition)
-    if not audioDescriptionLength or audioDescriptionLength > audioBlockEnd - audioPosition then
-        return nil
-    end
-    audioPosition = audioPosition + 4 + audioDescriptionLength
-
-    if audioPosition + 19 > audioBlockEnd then
-        return nil
-    end
-
-    audioPosition = audioPosition + 16
-    local audioPictureDataLength = assetBridgeAudioReadUInt32BE(audioBytes, audioPosition)
-    if not audioPictureDataLength then
-        return nil
-    end
-    audioPosition = audioPosition + 4
-
-    if audioPictureDataLength <= 0 or audioPosition + audioPictureDataLength - 1 > audioBlockEnd then
-        return nil
-    end
-
-    return string.sub(audioBytes, audioPosition, audioPosition + audioPictureDataLength - 1), audioMimeType
-end
-
-local function assetBridgeAudioParseFlacPicture(audioBytes)
-    if string.sub(audioBytes, 1, 4) ~= "fLaC" then
-        return nil, "The audio file is not a native FLAC stream."
-    end
-
-    local audioMetadataPosition = 5
-    while audioMetadataPosition + 3 <= #audioBytes do
-        local audioBlockHeader = string.byte(audioBytes, audioMetadataPosition)
-        local audioBlockLength = assetBridgeAudioReadUInt24BE(audioBytes, audioMetadataPosition + 1)
-        if not audioBlockLength then
-            break
-        end
-
-        local audioBlockType = audioBlockHeader % 128
-        local audioBlockStart = audioMetadataPosition + 4
-        local audioBlockEnd = audioBlockStart + audioBlockLength - 1
-        if audioBlockEnd > #audioBytes then
-            break
-        end
-
-        if audioBlockType == 6 then
-            local audioArtworkBytes, audioArtworkMime = assetBridgeAudioParseFlacPictureBlock(audioBytes, audioBlockStart, audioBlockEnd)
-            if audioArtworkBytes then
-                return audioArtworkBytes, audioArtworkMime
-            end
-        end
-
-        if audioBlockHeader >= 128 then
-            break
-        end
-        audioMetadataPosition = audioBlockEnd + 1
-    end
-
-    return nil, "No embedded FLAC picture block was found."
-end
-
-local function assetBridgeAudioDecodeBase64(audioBase64Text)
-    local audioBase64Alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
-    local audioBase64Output = {}
-    local audioBase64Accumulator = 0
-    local audioBase64BitCount = 0
-
-    for audioBase64Position = 1, #audioBase64Text do
-        local audioBase64Character = string.sub(audioBase64Text, audioBase64Position, audioBase64Position)
-        if audioBase64Character == "=" then
-            break
-        end
-
-        local audioBase64Value = string.find(audioBase64Alphabet, audioBase64Character, 1, true)
-        if not audioBase64Value then
-            return nil
-        end
-
-        audioBase64Accumulator = audioBase64Accumulator * 64 + audioBase64Value - 1
-        audioBase64BitCount = audioBase64BitCount + 6
-
-        if audioBase64BitCount >= 8 then
-            audioBase64BitCount = audioBase64BitCount - 8
-            local audioDecodedByte = math.floor(audioBase64Accumulator / (2 ^ audioBase64BitCount)) % 256
-            audioBase64Output[#audioBase64Output + 1] = string.char(audioDecodedByte)
-            audioBase64Accumulator = audioBase64Accumulator % (2 ^ audioBase64BitCount)
-        end
-    end
-
-    if #audioBase64Output == 0 then
-        return nil
-    end
-    return table.concat(audioBase64Output)
-end
-
-local function assetBridgeAudioParseVorbisCommentPacket(audioPacketBytes)
-    local audioCommentPosition
-    if string.sub(audioPacketBytes, 1, 7) == "\3vorbis" then
-        audioCommentPosition = 8
-    elseif string.sub(audioPacketBytes, 1, 8) == "OpusTags" then
-        audioCommentPosition = 9
-    else
-        return nil
-    end
-
-    local audioVendorLength = assetBridgeAudioReadUInt32LE(audioPacketBytes, audioCommentPosition)
-    if not audioVendorLength then
-        return nil
-    end
-    audioCommentPosition = audioCommentPosition + 4 + audioVendorLength
-
-    local audioCommentCount = assetBridgeAudioReadUInt32LE(audioPacketBytes, audioCommentPosition)
-    if not audioCommentCount or audioCommentCount > 10000 then
-        return nil
-    end
-    audioCommentPosition = audioCommentPosition + 4
-
-    local audioLegacyCoverBytes
-    local audioLegacyCoverMime
-
-    for audioCommentIndex = 1, audioCommentCount do
-        local audioCommentLength = assetBridgeAudioReadUInt32LE(audioPacketBytes, audioCommentPosition)
-        if not audioCommentLength then
-            break
-        end
-        audioCommentPosition = audioCommentPosition + 4
-
-        if audioCommentLength <= 0 or audioCommentPosition + audioCommentLength - 1 > #audioPacketBytes then
-            break
-        end
-
-        local audioCommentText = string.sub(audioPacketBytes, audioCommentPosition, audioCommentPosition + audioCommentLength - 1)
-        audioCommentPosition = audioCommentPosition + audioCommentLength
-        local audioEqualsPosition = string.find(audioCommentText, "=", 1, true)
-
-        if audioEqualsPosition then
-            local audioCommentName = string.upper(string.sub(audioCommentText, 1, audioEqualsPosition - 1))
-            local audioCommentValue = string.sub(audioCommentText, audioEqualsPosition + 1)
-
-            if audioCommentName == "METADATA_BLOCK_PICTURE" then
-                local audioPictureBlockBytes = assetBridgeAudioDecodeBase64(audioCommentValue)
-                if audioPictureBlockBytes then
-                    local audioArtworkBytes, audioArtworkMime = assetBridgeAudioParseFlacPictureBlock(
-                        audioPictureBlockBytes,
-                        1,
-                        #audioPictureBlockBytes
-                    )
-                    if audioArtworkBytes then
-                        return audioArtworkBytes, audioArtworkMime
-                    end
-                end
-            elseif audioCommentName == "COVERART" then
-                audioLegacyCoverBytes = assetBridgeAudioDecodeBase64(audioCommentValue)
-            elseif audioCommentName == "COVERARTMIME" then
-                audioLegacyCoverMime = audioCommentValue
-            end
-        end
-    end
-
-    if audioLegacyCoverBytes then
-        return audioLegacyCoverBytes, audioLegacyCoverMime
-    end
-
-    return nil
-end
-
-local function assetBridgeAudioParseOggArtwork(audioBytes)
-    local audioPagePosition = 1
-    local audioPacketBuffer = ""
-
-    while audioPagePosition + 26 <= #audioBytes do
-        if string.sub(audioBytes, audioPagePosition, audioPagePosition + 3) ~= "OggS" then
-            local audioNextPagePosition = string.find(audioBytes, "OggS", audioPagePosition + 1, true)
-            if not audioNextPagePosition then
-                break
-            end
-            audioPagePosition = audioNextPagePosition
-        end
-
-        local audioSegmentCount = string.byte(audioBytes, audioPagePosition + 26)
-        local audioSegmentTableStart = audioPagePosition + 27
-        local audioPageBodyPosition = audioSegmentTableStart + audioSegmentCount
-        if audioPageBodyPosition - 1 > #audioBytes then
-            break
-        end
-
-        for audioSegmentIndex = 0, audioSegmentCount - 1 do
-            local audioSegmentLength = string.byte(audioBytes, audioSegmentTableStart + audioSegmentIndex) or 0
-            local audioSegmentEnd = audioPageBodyPosition + audioSegmentLength - 1
-
-            if audioSegmentEnd > #audioBytes then
-                return nil, "The OGG page is incomplete."
-            end
-
-            if audioSegmentLength > 0 then
-                audioPacketBuffer = audioPacketBuffer .. string.sub(audioBytes, audioPageBodyPosition, audioSegmentEnd)
-            end
-            audioPageBodyPosition = audioPageBodyPosition + audioSegmentLength
-
-            if audioSegmentLength < 255 then
-                local audioArtworkBytes, audioArtworkMime = assetBridgeAudioParseVorbisCommentPacket(audioPacketBuffer)
-                if audioArtworkBytes then
-                    return audioArtworkBytes, audioArtworkMime
-                end
-                audioPacketBuffer = ""
-            end
-        end
-
-        audioPagePosition = audioPageBodyPosition
-    end
-
-    return nil, "No embedded OGG/Vorbis/Opus cover artwork was found."
-end
-
-local function assetBridgeAudioFindMp4Artwork(audioBytes, audioRangeStart, audioRangeEnd, audioDepth, audioInsideCoverAtom)
-    if audioDepth > 12 then
-        return nil
-    end
-
-    local audioAtomPosition = audioRangeStart
-    while audioAtomPosition + 7 <= audioRangeEnd do
-        local audioAtomSize = assetBridgeAudioReadUInt32BE(audioBytes, audioAtomPosition)
-        local audioAtomType = string.sub(audioBytes, audioAtomPosition + 4, audioAtomPosition + 7)
-        if not audioAtomSize then
-            break
-        end
-
-        local audioAtomHeaderSize = 8
-        if audioAtomSize == 1 then
-            local audioAtomHighSize = assetBridgeAudioReadUInt32BE(audioBytes, audioAtomPosition + 8)
-            local audioAtomLowSize = assetBridgeAudioReadUInt32BE(audioBytes, audioAtomPosition + 12)
-            if not audioAtomHighSize or not audioAtomLowSize or audioAtomHighSize > 0 then
-                break
-            end
-            audioAtomSize = audioAtomLowSize
-            audioAtomHeaderSize = 16
-        elseif audioAtomSize == 0 then
-            audioAtomSize = audioRangeEnd - audioAtomPosition + 1
-        end
-
-        if audioAtomSize < audioAtomHeaderSize then
-            break
-        end
-
-        local audioAtomEnd = audioAtomPosition + audioAtomSize - 1
-        if audioAtomEnd > audioRangeEnd then
-            break
-        end
-
-        local audioAtomPayloadStart = audioAtomPosition + audioAtomHeaderSize
-        if audioInsideCoverAtom and audioAtomType == "data" then
-            local audioArtworkStart = audioAtomPayloadStart + 8
-            if audioArtworkStart <= audioAtomEnd then
-                local audioArtworkBytes = string.sub(audioBytes, audioArtworkStart, audioAtomEnd)
-                local audioArtworkExtension = assetBridgeDetectExtension(audioArtworkBytes, nil, "embedded-artwork.bin")
-                if audioArtworkExtension and assetBridgeImageExtensions[audioArtworkExtension] then
-                    return audioArtworkBytes, "image/" .. (audioArtworkExtension == "jpg" and "jpeg" or audioArtworkExtension)
-                end
-            end
-        elseif audioAtomType == "covr" then
-            local audioArtworkBytes, audioArtworkMime = assetBridgeAudioFindMp4Artwork(
-                audioBytes,
-                audioAtomPayloadStart,
-                audioAtomEnd,
-                audioDepth + 1,
-                true
-            )
-            if audioArtworkBytes then
-                return audioArtworkBytes, audioArtworkMime
-            end
-        elseif audioAtomType == "moov" or audioAtomType == "udta" or audioAtomType == "meta" or audioAtomType == "ilst" then
-            local audioChildStart = audioAtomPayloadStart
-            if audioAtomType == "meta" then
-                audioChildStart = audioChildStart + 4
-            end
-            if audioChildStart <= audioAtomEnd then
-                local audioArtworkBytes, audioArtworkMime = assetBridgeAudioFindMp4Artwork(
-                    audioBytes,
-                    audioChildStart,
-                    audioAtomEnd,
-                    audioDepth + 1,
-                    false
-                )
-                if audioArtworkBytes then
-                    return audioArtworkBytes, audioArtworkMime
-                end
-            end
-        end
-
-        audioAtomPosition = audioAtomEnd + 1
-    end
-
-    return nil
-end
-
-local function assetBridgeAudioParseMp4Artwork(audioBytes)
-    local audioArtworkBytes, audioArtworkMime = assetBridgeAudioFindMp4Artwork(audioBytes, 1, #audioBytes, 0, false)
-    if audioArtworkBytes then
-        return audioArtworkBytes, audioArtworkMime
-    end
-    return nil, "No embedded M4A/MP4 cover artwork was found."
-end
-
-local function assetBridgeAudioExtractArtworkBytes(downloadedAudio)
-    local audioBytes = downloadedAudio.Bytes
-    if type(audioBytes) ~= "string" and type(assetBridgeReadFileFunction) == "function" then
-        local audioReadSuccess, audioReadResult = pcall(assetBridgeReadFileFunction, downloadedAudio.FilePath)
-        if audioReadSuccess and type(audioReadResult) == "string" then
-            audioBytes = audioReadResult
-        end
-    end
-
-    if type(audioBytes) ~= "string" then
-        return nil, "The cached audio bytes are unavailable; this executor needs readfile() to extract embedded artwork from cached tracks."
-    end
-
-    if downloadedAudio.Extension == "mp3" or string.sub(audioBytes, 1, 3) == "ID3" then
-        return assetBridgeAudioParseId3Picture(audioBytes)
-    elseif downloadedAudio.Extension == "flac" or string.sub(audioBytes, 1, 4) == "fLaC" then
-        return assetBridgeAudioParseFlacPicture(audioBytes)
-    elseif downloadedAudio.Extension == "m4a" or string.sub(audioBytes, 5, 8) == "ftyp" then
-        return assetBridgeAudioParseMp4Artwork(audioBytes)
-    elseif downloadedAudio.Extension == "ogg" or downloadedAudio.Extension == "oga" or string.sub(audioBytes, 1, 4) == "OggS" then
-        return assetBridgeAudioParseOggArtwork(audioBytes)
-    end
-
-    return nil, "Embedded artwork extraction is currently supported for MP3/ID3, FLAC, M4A/MP4 and OGG/Vorbis/Opus files."
-end
-
-local function assetBridgeCreateAudioArtworkAsset(downloadedAudio, audioOptions)
-    local audioArtworkBytes, audioArtworkMime = assetBridgeAudioExtractArtworkBytes(downloadedAudio)
-    if not audioArtworkBytes then
-        return nil, audioArtworkMime or "No embedded artwork was found."
-    end
-
-    local audioMaximumArtworkBytes = tonumber(audioOptions.MaxArtworkBytes) or 10485760
-    if #audioArtworkBytes > audioMaximumArtworkBytes then
-        return nil, "The embedded artwork exceeds the configured MaxArtworkBytes limit."
-    end
-
-    local audioArtworkExtension = assetBridgeDetectExtension(audioArtworkBytes, audioArtworkMime, "embedded-artwork.bin")
-    if not audioArtworkExtension or not assetBridgeImageExtensions[audioArtworkExtension] then
-        return nil, "The embedded artwork uses an unsupported image format."
-    end
-
-    local audioArtworkHash = assetBridgeHashString(downloadedAudio.Url .. ":artwork:" .. assetBridgeHashString(audioArtworkBytes))
-    local audioArtworkPath = "AssetBridge_AudioArtwork_" .. audioArtworkHash .. "." .. audioArtworkExtension
-    local audioArtworkCached = assetBridgeFileExists(audioArtworkPath)
-
-    if not audioArtworkCached then
-        if type(assetBridgeWriteFileFunction) ~= "function" then
-            return nil, "This executor does not expose writefile() for embedded artwork caching."
-        end
-
-        local audioArtworkWriteSuccess, audioArtworkWriteError = pcall(assetBridgeWriteFileFunction, audioArtworkPath, audioArtworkBytes)
-        if not audioArtworkWriteSuccess then
-            return nil, "Could not cache the embedded artwork: " .. tostring(audioArtworkWriteError)
-        end
-    end
-
-    return assetBridgeCreateImageAsset({
-        Url = "embedded-artwork://" .. tostring(downloadedAudio.Url),
-        FilePath = audioArtworkPath,
-        Extension = audioArtworkExtension,
-        Size = #audioArtworkBytes,
-        Cached = audioArtworkCached
-    })
-end
-
 local function assetBridgeCreateAudioAsset(downloadedAsset, audioOptions)
     audioOptions = audioOptions or {}
     local audioAssetId, assetIdError = assetBridgeGetCustomAssetId(downloadedAsset.FilePath)
@@ -3032,43 +2533,10 @@ local function assetBridgeCreateAudioAsset(downloadedAsset, audioOptions)
         FilePath = downloadedAsset.FilePath,
         Format = downloadedAsset.Extension,
         Size = downloadedAsset.Size,
-        Cached = downloadedAsset.Cached,
-        Artwork = nil,
-        ArtworkImageId = nil,
-        ArtworkFilePath = nil,
-        ArtworkError = nil
+        Cached = downloadedAsset.Cached
     }
 
     audioAsset.SoundID = audioAsset.SoundId
-
-    function audioAsset:ExtractArtwork()
-        if self.Artwork then
-            return self.Artwork
-        end
-
-        local extractedArtwork, artworkError = assetBridgeCreateAudioArtworkAsset(downloadedAsset, audioOptions)
-        if not extractedArtwork then
-            self.ArtworkError = artworkError
-            return nil, artworkError
-        end
-
-        self.Artwork = extractedArtwork
-        self.ArtworkImageId = extractedArtwork.ImageId
-        self.ArtworkFilePath = extractedArtwork.FilePath
-        self.ArtworkError = nil
-        return extractedArtwork
-    end
-
-    function audioAsset:GetArtwork()
-        if self.Artwork then
-            return self.Artwork
-        end
-        return nil, self.ArtworkError or "Embedded artwork has not been extracted."
-    end
-
-    if audioOptions.ExtractArtwork ~= false then
-        audioAsset:ExtractArtwork()
-    end
 
     function audioAsset:CreateSound(parentInstance, soundProperties)
         soundProperties = soundProperties or {}
@@ -3165,27 +2633,69 @@ function AssetBridge.Cache.ClearDisk()
         return false, "This executor does not expose listfiles()."
     end
 
-    local listSuccess, listedFiles = pcall(listFilesFunction, "")
-    if not listSuccess or type(listedFiles) ~= "table" then
-        return false, "Could not list files in the executor root."
-    end
-
+    local cacheRoot = AssetBridge.Config.CacheDirectory or "abysall/AssetBridge"
     local deletedCount = 0
+    local visitedFolders = {}
 
-    for _, filePath in ipairs(listedFiles) do
-        local fileName = tostring(filePath):match("([^/\\]+)$") or tostring(filePath)
-        if string.match(fileName, "^AssetBridge_[%w_%-]+%.[%w]+$") then
-            local deleteSuccess = pcall(assetBridgeDeleteFileFunction, filePath)
-            if deleteSuccess then
-                deletedCount = deletedCount + 1
+    local function deleteCacheFilesRecursively(folderPath)
+        if visitedFolders[folderPath] then
+            return
+        end
+        visitedFolders[folderPath] = true
+
+        local listSuccess, listedFiles = pcall(listFilesFunction, folderPath)
+        if not listSuccess or type(listedFiles) ~= "table" then
+            return
+        end
+
+        for _, listedPath in ipairs(listedFiles) do
+            local filePath = tostring(listedPath)
+            local isDirectory = false
+            local isFolderFunction = assetBridgeSafeGetGlobal("isfolder")
+            if type(isFolderFunction) == "function" then
+                local folderCheckSuccess, folderCheckResult = pcall(isFolderFunction, filePath)
+                isDirectory = folderCheckSuccess and folderCheckResult == true
+            end
+
+            if isDirectory then
+                deleteCacheFilesRecursively(filePath)
+            elseif string.find(filePath, cacheRoot .. "/", 1, true) == 1 then
+                local deleteSuccess = pcall(assetBridgeDeleteFileFunction, filePath)
+                if deleteSuccess then
+                    deletedCount = deletedCount + 1
+                end
             end
         end
     end
 
+    deleteCacheFilesRecursively(cacheRoot)
     table.clear(assetBridgeMemoryCache)
     return true, deletedCount
 end
 
+function AssetBridge.Cache.GetDirectories()
+    return {
+        Root = AssetBridge.Config.CacheDirectory or "abysall/AssetBridge",
+        Images = AssetBridge.Config.ImageCacheDirectory or "abysall/AssetBridge/images",
+        Audio = AssetBridge.Config.AudioCacheDirectory or "abysall/AssetBridge/audio",
+        GIF = AssetBridge.Config.GIFCacheDirectory or "abysall/AssetBridge/gif"
+    }
+end
+
+function AssetBridge.Cache.EnsureDirectories()
+    local cacheDirectories = AssetBridge.Cache.GetDirectories()
+    for _, cacheDirectory in ipairs({cacheDirectories.Root, cacheDirectories.Images, cacheDirectories.Audio, cacheDirectories.GIF}) do
+        local folderSuccess, folderError = assetBridgeEnsureFolder(cacheDirectory)
+        if not folderSuccess then
+            return false, folderError
+        end
+    end
+    return true, cacheDirectories
+end
+
 assetBridgeRefreshCapabilities()
+pcall(function()
+    AssetBridge.Cache.EnsureDirectories()
+end)
 
 return AssetBridge
