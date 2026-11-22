@@ -2623,6 +2623,86 @@ function AssetBridge.Cache.GetMemoryCount()
     return cachedAssetCount
 end
 
+function AssetBridge.Cache.DeleteUrls(assetEntries)
+    if type(assetEntries) ~= "table" then
+        return false, "DeleteUrls() expects an array of {Url, Type} entries."
+    end
+
+    assetBridgeRefreshCapabilities()
+    if type(assetBridgeDeleteFileFunction) ~= "function" then
+        return false, "This executor does not expose delfile()."
+    end
+
+    local listFilesFunction = assetBridgeSafeGetGlobal("listfiles")
+    if type(listFilesFunction) ~= "function" then
+        return false, "This executor does not expose listfiles()."
+    end
+
+    local cacheDirectories = AssetBridge.Cache.GetDirectories()
+    local prefixesByDirectory = {
+        [cacheDirectories.Audio] = {},
+        [cacheDirectories.Images] = {},
+        [cacheDirectories.GIF] = {}
+    }
+    local normalizedMemoryKeys = {}
+
+    for _, assetEntry in ipairs(assetEntries) do
+        if type(assetEntry) == "table" and type(assetEntry.Url) == "string" then
+            local assetType = assetEntry.Type or assetEntry.type or "Image"
+            local normalizedUrl = assetBridgeNormalizeUrl(assetEntry.Url)
+            if normalizedUrl and (assetType == "Audio" or assetType == "Image" or assetType == "GIF") then
+                local assetHash = assetBridgeHashString(normalizedUrl)
+
+                if assetType == "Audio" then
+                    prefixesByDirectory[cacheDirectories.Audio]["AssetBridge_" .. assetHash .. "."] = true
+                    normalizedMemoryKeys["Audio:" .. normalizedUrl] = true
+                else
+                    prefixesByDirectory[cacheDirectories.Images]["AssetBridge_" .. assetHash .. "."] = true
+                    prefixesByDirectory[cacheDirectories.GIF]["AssetBridge_" .. assetHash .. "."] = true
+                    prefixesByDirectory[cacheDirectories.GIF]["AssetBridge_GIF_" .. assetHash .. "_Frame_"] = true
+                    normalizedMemoryKeys["Image:" .. normalizedUrl] = true
+                end
+            end
+        end
+    end
+
+    for memoryKey in pairs(normalizedMemoryKeys) do
+        assetBridgeMemoryCache[memoryKey] = nil
+    end
+
+    local deletedCount = 0
+    for cacheDirectory, filenamePrefixes in pairs(prefixesByDirectory) do
+        if next(filenamePrefixes) then
+            local listSuccess, listedFiles = pcall(listFilesFunction, cacheDirectory)
+            if listSuccess and type(listedFiles) == "table" then
+                for _, listedPath in ipairs(listedFiles) do
+                    local filePath = tostring(listedPath)
+                    local fileName = string.match(filePath, "[^/\\]+$") or filePath
+                    for filenamePrefix in pairs(filenamePrefixes) do
+                        if string.sub(fileName, 1, #filenamePrefix) == filenamePrefix then
+                            local deleteSuccess = pcall(assetBridgeDeleteFileFunction, filePath)
+                            if deleteSuccess then
+                                deletedCount = deletedCount + 1
+                            end
+                            break
+                        end
+                    end
+                end
+            end
+        end
+    end
+
+    return true, deletedCount
+end
+
+function AssetBridge.Cache.DeleteUrl(url, assetType)
+    if type(url) ~= "string" or url == "" then
+        return false, "DeleteUrl() requires a URL."
+    end
+
+    return AssetBridge.Cache.DeleteUrls({{Url = url, Type = assetType or "Image"}})
+end
+
 function AssetBridge.Cache.ClearDisk()
     if type(assetBridgeDeleteFileFunction) ~= "function" then
         return false, "This executor does not expose delfile()."
