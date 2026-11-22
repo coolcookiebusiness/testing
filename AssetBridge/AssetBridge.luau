@@ -1,6 +1,6 @@
 local AssetBridge = {
     Name = "AssetBridge",
-    Version = "0.2.4",
+    Version = "0.2.5",
     Config = {
         Cache = true,
         CacheDirectory = "abysall/AssetBridge",
@@ -24,6 +24,7 @@ local AssetBridge = {
 AssetBridge.Gif = AssetBridge.GIF
 
 local assetBridgeMemoryCache = {}
+local assetBridgeTemporaryAssetCounter = 0
 local assetBridgeRequestFunction = request or http_request
 local assetBridgeWriteFileFunction = writefile
 local assetBridgeReadFileFunction = readfile
@@ -443,9 +444,13 @@ local function assetBridgeDownload(assetBridgeUrl, assetBridgeExpectedType, asse
     end
 
     local assetBridgeCacheKey = assetBridgeExpectedType .. ":" .. assetBridgeNormalizedUrl
+    local assetBridgeTemporary = assetBridgeOptions.Temporary == true
     local assetBridgeUseCache = assetBridgeOptions.Cache
     if assetBridgeUseCache == nil then
         assetBridgeUseCache = AssetBridge.Config.Cache
+    end
+    if assetBridgeTemporary then
+        assetBridgeUseCache = false
     end
 
     if assetBridgeUseCache and not assetBridgeOptions.Refresh then
@@ -489,8 +494,24 @@ local function assetBridgeDownload(assetBridgeUrl, assetBridgeExpectedType, asse
         return nil, "The URL did not return a supported " .. string.lower(assetBridgeExpectedType) .. " format. Detected: " .. assetBridgeDetectedExtension
     end
 
-    local assetBridgeCachePath = assetBridgeBuildCachePath(assetBridgeNormalizedUrl, assetBridgeDetectedExtension)
-    local assetBridgeFolderSuccess, assetBridgeFolderError = assetBridgeEnsureFolder(assetBridgeGetCacheDirectory(assetBridgeDetectedExtension))
+    local assetBridgeCachePath = nil
+    local assetBridgeWriteDirectory = nil
+    if assetBridgeTemporary then
+        assetBridgeWriteDirectory = (AssetBridge.Config.CacheDirectory or "abysall/AssetBridge") .. "/temp"
+        assetBridgeTemporaryAssetCounter = assetBridgeTemporaryAssetCounter + 1
+        assetBridgeCachePath = assetBridgeWriteDirectory
+            .. "/AssetBridge_Temporary_"
+            .. assetBridgeHashString(assetBridgeNormalizedUrl)
+            .. "_"
+            .. tostring(assetBridgeTemporaryAssetCounter)
+            .. "."
+            .. assetBridgeDetectedExtension
+    else
+        assetBridgeWriteDirectory = assetBridgeGetCacheDirectory(assetBridgeDetectedExtension)
+        assetBridgeCachePath = assetBridgeBuildCachePath(assetBridgeNormalizedUrl, assetBridgeDetectedExtension)
+    end
+
+    local assetBridgeFolderSuccess, assetBridgeFolderError = assetBridgeEnsureFolder(assetBridgeWriteDirectory)
     if not assetBridgeFolderSuccess then
         return nil, "Could not prepare the AssetBridge cache directory: " .. tostring(assetBridgeFolderError)
     end
@@ -508,10 +529,11 @@ local function assetBridgeDownload(assetBridgeUrl, assetBridgeExpectedType, asse
         Extension = assetBridgeDetectedExtension,
         ContentType = assetBridgeContentType,
         StatusCode = assetBridgeStatusCode,
-        Cached = false
+        Cached = false,
+        Temporary = assetBridgeTemporary
     }
 
-    if assetBridgeUseCache then
+    if assetBridgeUseCache and not assetBridgeTemporary then
         assetBridgeMemoryCache[assetBridgeCacheKey] = assetBridgeAssetData
     end
 
@@ -2533,10 +2555,36 @@ local function assetBridgeCreateAudioAsset(downloadedAsset, audioOptions)
         FilePath = downloadedAsset.FilePath,
         Format = downloadedAsset.Extension,
         Size = downloadedAsset.Size,
-        Cached = downloadedAsset.Cached
+        Cached = downloadedAsset.Cached,
+        Temporary = downloadedAsset.Temporary == true,
+        Destroyed = false
     }
 
     audioAsset.SoundID = audioAsset.SoundId
+
+    function audioAsset:Destroy()
+        if self.Destroyed then
+            return true
+        end
+
+        if self.Temporary and type(self.FilePath) == "string" then
+            assetBridgeRefreshCapabilities()
+            if type(assetBridgeDeleteFileFunction) ~= "function" then
+                return false, "This executor does not expose delfile(); the temporary audio file could not be removed."
+            end
+
+            local assetBridgeTemporaryDeleteSuccess, assetBridgeTemporaryDeleteError = pcall(assetBridgeDeleteFileFunction, self.FilePath)
+            if not assetBridgeTemporaryDeleteSuccess then
+                return false, "Could not remove temporary audio file: " .. tostring(assetBridgeTemporaryDeleteError)
+            end
+        end
+
+        self.Destroyed = true
+        self.FilePath = nil
+        self.SoundId = nil
+        self.SoundID = nil
+        return true
+    end
 
     function audioAsset:CreateSound(parentInstance, soundProperties)
         soundProperties = soundProperties or {}
